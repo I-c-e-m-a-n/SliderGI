@@ -6,6 +6,7 @@ __pycache__/
 /models/*
 !/models/.gitkeep
 /third_party/llama.cpp/
+/third_party/llama.cpp.backup-*/
 /config/local.json
 /build/
 /dist/

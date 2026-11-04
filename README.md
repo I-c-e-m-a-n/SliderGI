@@ -256,8 +256,13 @@ no agents, tool execution, task database or background workers.
 * **Invalid Python:** no file is written; refine the request. Other supported
   languages have framing checks, but no automatic compiler/type checker in v1.
 * **Existing file:** choose a new filename or authorize overwrite explicitly.
-* **Engine pin mismatch:** move a custom build aside; setup refuses to reset an
-  unrelated checkout. A matching successful build is reused.
+* **Engine pin mismatch/interrupted setup:** run `git pull --ff-only` and restart.
+  Setup preserves the entire previous upstream checkout/build in
+  `third_party/llama.cpp.backup-<unique-id>`, then fetches the exact required
+  commit into a fresh checkout. Models are retained. Backups are ignored by Git;
+  remove them manually only after checking for local work you want to keep.
+  Offline mode and explicit `engine_path` overrides still fail rather than
+  replacing a runtime. macOS builds explicitly disable Metal for CPU-only use.
 * **Offline pip attempt:** finish initial installation first. Changing
   `pyproject.toml` intentionally refreshes dependencies at the next launch.
 

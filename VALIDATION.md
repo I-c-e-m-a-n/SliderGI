@@ -1,5 +1,20 @@
 # Validation record — 2026-11-04
 
+## Checkout recovery fix
+
+After a reported macOS pin mismatch, setup now fetches the exact pinned commit
+directly rather than cloning the moving default branch first. Mismatched and
+interrupted checkouts are preserved in uniquely named, Git-ignored backup
+directories before fetching anew; no model files are moved. Metal is explicitly
+disabled for CPU-only macOS builds.
+
+Verified a fresh official GitHub fetch with the corrected helper and confirmed
+the exact expected HEAD. Added three local-Git regression tests for exact pin
+selection/reuse, backup preservation of local edits/builds/history, and retry
+after an interrupted fetch. Full Linux suite: **26 discovered, 23 passed,
+3 skipped** (genuine inference, Windows CMD, Windows PowerShell). macOS execution
+has not been tested. The Qwen and hardware-validation limitations below remain.
+
 Test environment: Linux x86-64, Python 3.12, GCC 14.2, CMake 3.31.6.
 This is not the target Lenovo or Windows 10.
 
