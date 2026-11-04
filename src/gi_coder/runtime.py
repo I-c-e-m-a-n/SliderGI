@@ -1,5 +1,6 @@
 """Owned localhost llama.cpp child. No remote endpoint or user API credentials."""
 import json
+import atexit
 import secrets
 import socket
 import subprocess
@@ -12,6 +13,10 @@ from pathlib import Path
 from .config import ROOT, CoderError, installation_path
 
 LLAMA_COMMIT = "74d4f5b041ad837153b0e90fc864b8290e01d8d5"
+
+
+class RuntimeFailure(CoderError):
+    """The owned inference process is unusable and has been stopped."""
 
 
 def discover_engine(config, root=ROOT):
@@ -51,14 +56,15 @@ class Runtime:
         self.url = f"http://127.0.0.1:{port}"
         self.log = tempfile.TemporaryFile(mode="w+b")
         command = [str(engine), "--model", str(self.model), "--host", "127.0.0.1",
-                   "--port", str(port), "--api-key", self.key, "--jinja",
+                   "--port", str(port), "--api-key", self.key, "--jinja", "--no-context-shift",
                    "--ctx-size", str(self.config["context_size"]),
                    "--threads", str(self.config["threads"]), "--gpu-layers", "0",
                    "--parallel", "1", "--batch-size", "128", "--ubatch-size", "128",
                    "--n-predict", str(self.config["max_tokens"])]
         try:
             self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                                            stdout=self.log, stderr=self.log)
+                                            stdout=self.log, stderr=self.log, start_new_session=True)
+            atexit.register(self.close)
             deadline = time.monotonic() + self.config["load_timeout"]
             while time.monotonic() < deadline:
                 if self.process.poll() is not None:
@@ -85,12 +91,23 @@ class Runtime:
         system = (f"You are a precise coding assistant. Produce one complete, runnable {language} source file. "
                   "Return exactly one Markdown code block containing only the full source code. "
                   "No explanations, no placeholders, no multiple files. Do not execute anything.")
+        return self.complete(system, prompt)
+
+    def complete(self, system, prompt, schema=None):
+        """Stateless chat: fresh messages and no KV/prompt reuse on every call."""
+        if self.process is not None and self.process.poll() is not None:
+            self.close()
+            raise RuntimeFailure('Local inference process exited; restart GI-Coder')
+        payload = {
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            "max_tokens": self.config["max_tokens"], "temperature": self.config["temperature"],
+            "stream": False, "cache_prompt": False, "id_slot": 0}
+        if schema is not None:
+            payload["response_format"] = {"type": "json_schema", "json_schema": {
+                "name": "request_assessment", "strict": True, "schema": schema}}
         started = time.monotonic()
         try:
-            result = self.request("/v1/chat/completions", {
-                "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-                "max_tokens": self.config["max_tokens"], "temperature": self.config["temperature"],
-                "stream": False}, timeout=self.config["generation_timeout"])
+            result = self.request("/v1/chat/completions", payload, timeout=self.config["generation_timeout"])
             choice = result["choices"][0]
             if choice.get("finish_reason") != "stop":
                 raise CoderError("Generation did not finish (possibly output-token limit). "
@@ -101,11 +118,16 @@ class Runtime:
             return content, {"seconds": round(time.monotonic() - started, 2), **result.get("usage", {})}
         except urllib.error.HTTPError as exc:
             detail = exc.read(4000).decode("utf-8", errors="replace")
+            if exc.code >= 500:
+                self.close()
+                raise RuntimeFailure(f'llama.cpp runtime failure ({exc.code}): {detail}') from exc
             raise CoderError(f"llama.cpp rejected the request ({exc.code}): {detail}") from exc
         except (OSError, KeyError, ValueError, IndexError, TypeError) as exc:
-            raise CoderError(f"Local inference failed: {exc}. Check context size and runtime configuration.") from exc
+            self.close()
+            raise RuntimeFailure(f"Local inference failed: {exc}. Restart GI-Coder.") from exc
 
     def close(self):
+        atexit.unregister(self.close)
         if self.process is not None and self.process.poll() is None:
             self.process.terminate()
             try:

@@ -7,7 +7,9 @@ from . import __version__
 from .config import ROOT, CoderError, load_config, switch_model
 from .generation import choose_language, extract_source, output_path, write_source
 from .models import ensure_model
-from .runtime import Runtime
+from .runtime import Runtime, RuntimeFailure
+from .pipeline import process_request
+from .session import session_signals, SessionTerminated
 from .setup import ensure_engine
 
 
@@ -91,17 +93,10 @@ def interactive(config):
                         while (line := input("... ")) != ".":
                             lines.append(line)
                         prompt = "\n".join(lines)
-                    language = choose_language(prompt)
-                    filename = input(f"Filename (blank = generated): ").strip() or None
-                    language = choose_language(prompt, language, filename)
-                    path = output_path(language, filename)
-                    overwrite = False
-                    if path.exists():
-                        overwrite = input(f"Overwrite {path}? Type yes: ").strip() == "yes"
-                        if not overwrite:
-                            print("Cancelled")
-                            continue
-                    deliver(runtime, prompt, language, path, overwrite)
+                    process_request(runtime, prompt, confirm=lambda path:
+                        input(f"Overwrite {path}? Type yes: ").strip() == 'yes')
+            except RuntimeFailure:
+                raise
             except CoderError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
                 if runtime is None:
@@ -111,7 +106,7 @@ def interactive(config):
             runtime.close()
 
 
-def main(argv=None):
+def execute(argv=None):
     args = parser().parse_args(argv)
     try:
         config = load_config()
@@ -136,12 +131,8 @@ def main(argv=None):
             prompt = " ".join(args.prompt).strip()
             if not prompt:
                 raise CoderError("Coding request cannot be empty")
-            language = choose_language(prompt, args.language, args.filename)
-            path = output_path(language, args.filename, args.output_dir)
-            if path.exists() and not args.overwrite:
-                raise CoderError(f"Refusing to overwrite {path}; use --overwrite explicitly")
             with Runtime(config, prepared(config, args.offline)) as runtime:
-                deliver(runtime, prompt, language, path, args.overwrite)
+                process_request(runtime, prompt, args.language, args.filename, args.output_dir, args.overwrite)
         else:
             interactive(config)
         return 0
@@ -151,6 +142,14 @@ def main(argv=None):
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled", file=sys.stderr)
         return 130
+
+
+def main(argv=None):
+    try:
+        with session_signals():
+            return execute(argv)
+    except SessionTerminated as exc:
+        return 128 + exc.signum
 
 
 if __name__ == "__main__":

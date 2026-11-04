@@ -1,4 +1,41 @@
-# Validation record — 2026-11-04
+# Validation record
+
+## macOS session and assessment upgrade — 2026-11-05 (Singapore)
+
+Target: macOS only. Runner: Linux x86-64, Python 3.12. No macOS host is
+available in this task. V1 tests are retained unchanged.
+
+New coverage includes Qwen-assessment JSON schema/semantic validation, explicit
+options taking precedence, automatic Rust filenames, unmapped-language fallback,
+JSON metadata sidecars, independent overwrite consent, private temporary files
+and cleanup, safe headers, text routing, context-isolated HTTP payloads,
+interactive reuse/model switching and runtime failure behavior. Actual POSIX
+subprocess tests use a clearly marked synthetic HTTP engine to exercise four
+calls sharing one PID and cleanup on SIGINT, SIGTERM and SIGHUP. These are not
+genuine Qwen completions. Signal tests exposed an intermittent shutdown issue
+while changing OS signal dispositions inside a handler; shutdown now uses an
+idempotent Python handler. The isolated subprocess/signal suite passed five
+independent runs after that correction.
+
+Final full suite: **46 discovered, 42 passed, 4 skipped** (two opt-in genuine
+Qwen tests and two legacy Windows launchers). Syntax compilation, shell syntax
+checking and Git whitespace checks passed.
+
+The genuine resident-session test was explicitly enabled and **blocked before
+inference** by missing official 7B weights/verification receipt. Online setup
+was retried and still receives proxy **403 Forbidden** from huggingface.co.
+No actual Qwen assessment, generated source or model-residency performance is
+claimed verified. The new opt-in test covers real assessment + Python source
+generation + `py_compile`, an independent text question, unchanged runtime PID
+and request isolation once weights are available. Run README's commands on Mac
+for both models. The original genuine smoke test also remains available.
+
+macOS Intel/Apple Silicon compilation, real terminal closure on macOS and the
+real-model tests remain unexecuted. Legacy Windows integration tests are skipped
+on Linux and outside this upgrade's target. GitHub API access returns Forbidden;
+the feature branch can be published with Git, but API-based PR creation is blocked.
+
+## Original validation — 2026-11-04
 
 ## Checkout recovery fix
 

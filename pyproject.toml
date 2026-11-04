@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gi-coder"
-version = "1.0.0"
+version = "1.1.0"
 description = "Local Qwen coding CLI powered by llama.cpp"
 requires-python = ">=3.10"
 dependencies = ["huggingface-hub==0.30.2"]
