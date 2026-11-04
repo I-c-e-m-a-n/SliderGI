@@ -52,7 +52,7 @@ def prepared(config, offline=False):
 
 
 def interactive(config):
-    print(f"GI-Coder v{__version__}\nModel: Qwen2.5-Coder-{config['model'].upper()}\nInference: Local CPU")
+    print(f"GI-Coder v{__version__}\nModel: Qwen2.5-Coder-{config['model'].upper()}")
     runtime = None
     try:
         runtime = Runtime(config, prepared(config)).__enter__()

@@ -2,7 +2,7 @@
 
 GI-Coder uses Qwen2.5-Coder GGUF and a pinned official llama.cpp runtime on your
 Mac. It assesses English requests, answers ordinary questions in the terminal,
-or writes one source file in your working directory. No Ollama, hosted inference,
+or writes one source file in the installation's sibling `SliderGI_Output` folder. No Ollama, hosted inference,
 subscription, user API key, agent orchestration or generated-code execution.
 
 **Validation:** regression, protocol and POSIX process/signal tests run on Linux.
@@ -51,13 +51,17 @@ git pull --ff-only
 First launch creates repository-local `.venv`, installs dependencies, fetches
 official llama.cpp commit `74d4f5b041ad837153b0e90fc864b8290e01d8d5` (`b5046`),
 builds `llama-server` with CMake, downloads the selected official Qwen model,
-checks its SHA-256 and loads it. CMake uses two build jobs; CUDA and Metal are
-disabled for CPU inference. A mismatched/interrupted upstream checkout is
+checks its SHA-256 and loads it. CMake uses two build jobs. On macOS, Metal
+support and embedded shaders are enabled by default; CUDA remains disabled.
+A mismatched/interrupted upstream checkout is
 preserved in `third_party/llama.cpp.backup-<unique-id>` before fetching the pin.
 Models are unaffected. Inspect backups before removing them manually.
 
 Subsequent launches reuse dependencies, builds and valid weights. There is no
-automatic recompilation/redownload on each launch. The model loads once for
+automatic recompilation/redownload on each launch. An existing CPU-only macOS
+build is upgraded once to enable Metal. Failed Metal builds fall back to CPU
+and record that attempt, avoiding a rebuild on every launch. Explicit engine
+overrides and offline runs reuse the existing engine. The model loads once for
 each interactive session and stays resident until that session ends, the
 runtime fails or you explicitly switch models. There is no idle-unload policy,
 cross-session worker or background daemon.
@@ -66,7 +70,31 @@ Allow roughly 15 GB free disk for one model and setup headroom. 7B Q4_K_M weight
 are roughly 4.7 GB; 3B roughly 2 GB. RAM requirements exceed weight size and vary
 with context. Start with 3B on memory-constrained Macs. CPU speed/RAM estimates
 are not performance measurements. Defaults: four threads, 2,048 context tokens,
-768 output tokens and one inference sequence.
+768 generation tokens, a separate 384-token assessment budget and one inference sequence.
+
+## Metal acceleration and fallback
+
+`backend` accepts `auto` (default), `metal` or `cpu`. `gpu_layers` is a
+nonnegative integer: the default 99 requests all layers of the supported Qwen
+models, a smaller positive number requests partial offload, and 0 forces CPU.
+`backend=metal` expresses a preference and still allows graceful CPU fallback.
+Use `backend=cpu` to disable acceleration explicitly.
+
+On macOS GI-Coder probes the pinned executable with `--list-devices` before
+loading weights. It selects a reported Metal device, not an assumed GPU based
+on the Mac's name. If unsupported or probing fails, CPU is used. If accelerated
+model initialization fails, that child is stopped and startup retries once on
+CPU. There are no automatic reloads after the session becomes ready. Subsequent
+requests reuse the resident process; runtime failures end the session.
+
+Startup displays `Inference: Local Metal (N layers offloaded)` only when the
+load log confirms actual layer offloading; otherwise it displays `Local CPU`.
+Detection probes do not load weights. GPU memory pressure, unsupported hardware,
+missing Metal tools or custom CPU-only executables can prevent acceleration.
+If a failed build was cached, remove only
+`third_party/llama.cpp/build/.gi-coder-build.json` after fixing build tools to
+retry the Metal upgrade. Missing rebuild prerequisites reuse a working CPU
+engine when available. No Mac/Metal benchmark has been run in this cloud.
 
 ## Interactive use
 
@@ -110,8 +138,21 @@ Existing options remain: `--language/-l`, `--filename/-f`, `--output-dir/-o`,
 request code and override inferred preferences. Conflicting explicit language
 and extension are rejected. `--filename` accepts a basename, not a path; use
 `--output-dir` for directories. Hidden names, traversal, separators and control
-characters are rejected. The default output directory is always the caller's
-working directory, even when invoking `/path/to/SliderGI/start` from elsewhere.
+characters are rejected. Automatically generated source and metadata default to
+`ROOT.parent / SliderGI_Output`, where ROOT is the resolved installation path:
+
+```text
+ParentDirectory/
+├── SliderGI/
+└── SliderGI_Output/
+    ├── calculator.py
+    └── greeting.rs
+```
+
+The folder is created when writing code and reused. Calling `start` from another
+terminal directory does not change this default. Explicit `--output-dir` paths
+still override it; relative overrides remain relative to the caller. Existing
+files retain overwrite protection. Text responses do not create the output folder.
 
 Python is syntax-checked before writing; JSON is parsed when generated as JSON.
 Other languages receive framing and filename checks but no automatic compiler
@@ -135,10 +176,30 @@ validated in Python. Fields: `output_type`, `objective`, `constraints`,
 `revised_prompt`, `functions`. Unknown/duplicate fields, wrong types, oversized
 values, inconsistent routing and unsafe paths fail without source output.
 Function summaries contain `name`, `inputs`, `behaviour`, `variables`, `outputs`;
-a module summary covers files without functions. Text assessments have null
-language/filename/extension and no functions. Assessments are advisory: original
+a module summary covers files without functions. Text assessments emit only
+`output_type`, `objective`, `constraints`, `complexity`, `revised_prompt` over
+the inference protocol, reducing JSON output overhead. Validation restores
+the code-only null fields and empty functions internally. Every request,
+including `Hi`, still receives a Qwen assessment and a real revised prompt;
+there is no greeting shortcut. Assessments are advisory: original
 user instructions remain in the generation prompt. Mechanical validation cannot
 prove that the model understood every semantic constraint correctly.
+
+Each successful response, including text, ends with actual monotonic-clock
+measurements: `Assessment`, `Generation`, and `Total` in seconds. Assessment
+includes inference and validation; generation measures its separate inference
+call. Total runs from request entry through output and temporary-file cleanup,
+including file I/O or overwrite consent, but excluding initial model setup/load.
+Measurements are unrounded internally and displayed to two decimal places.
+They are local wall-clock durations, never values supplied by Qwen. Total can
+exceed the sum of the two stages. A zero display can reflect sub-0.005s mocked
+calls; it is not an inference performance claim.
+
+Latency changes reduce assessment instructions and text-schema output fields,
+use compact JSON prompts, deterministic assessment sampling, and a separate
+`assessment_max_tokens` limit. No assessment or rewrite is skipped. Complex
+assessments that reach their budget fail without writing files; increase that
+limit and context as needed rather than silently losing constraints.
 
 Request-private `assessment.json` and `revised-prompt.json` files live under
 `.gi-coder/tmp/request-*` with owner-only permissions, and are removed on
@@ -193,6 +254,7 @@ Defaults are in `config/settings.json`; overrides go in ignored `config/local.js
 
 ```json
 {"model": "3b", "context_size": 2048, "threads": 4, "max_tokens": 768,
+ "assessment_max_tokens": 384, "backend": "auto", "gpu_layers": 99,
  "temperature": 0.2, "model_path": null, "engine_path": null,
  "load_timeout": 300, "generation_timeout": 1800}
 ```
@@ -225,6 +287,15 @@ Synthetic subprocess tests exercise four calls sharing one child PID and actual
 SIGINT/SIGTERM/SIGHUP cleanup. Protocol tests inspect fresh message payloads and
 disabled cache reuse. V1 tests are retained. See the validation record for what
 was actually executed and what remains blocked.
+
+For real performance measurements, start `./start` once, note the actual backend
+and model, and submit `Hi` several times. Every iteration assesses and revises
+afresh on that resident model. Record each stage/total duration, Mac model,
+macOS version, model quantization, context and offloaded layers. Compare with
+`backend=cpu` in a new session using the same settings. Initial model loading
+is excluded from request timings. GPU availability, memory bandwidth, thermal
+throttling and generated-token count affect latency; no numeric macOS speedup
+is claimed from Linux or mocked tests.
 
 ## Architecture, troubleshooting and licences
 

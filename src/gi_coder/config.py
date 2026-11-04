@@ -1,4 +1,4 @@
-"""Installation-relative configuration; output paths are always caller-relative."""
+"""Installation-relative configuration and caller-relative explicit overrides."""
 import json
 import os
 from pathlib import Path
@@ -21,15 +21,23 @@ def load_config(root=ROOT):
         local = root / "config/local.json"
         if local.exists():
             config.update(json.loads(local.read_text(encoding="utf-8")))
+        config.setdefault('assessment_max_tokens', 384)
+        config.setdefault('backend', 'auto')
+        config.setdefault('gpu_layers', 99)
         if config["model"] not in MODELS:
             raise ValueError("model must be 7b or 3b")
         for name, low, high in (("context_size", 512, 32768), ("threads", 1, 256),
-                                ("max_tokens", 16, 32768), ("load_timeout", 1, 86400),
+                                ("max_tokens", 16, 32768), ('assessment_max_tokens', 128, 4096),
+                                ('gpu_layers', 0, 999), ("load_timeout", 1, 86400),
                                 ("generation_timeout", 1, 86400)):
             if type(config[name]) is not int or not low <= config[name] <= high:
                 raise ValueError(f"{name} must be an integer from {low} to {high}")
         if config["max_tokens"] >= config["context_size"]:
             raise ValueError("max_tokens must be smaller than context_size")
+        if config['assessment_max_tokens'] >= config['context_size']:
+            raise ValueError('assessment_max_tokens must be smaller than context_size')
+        if config['backend'] not in ('auto', 'metal', 'cpu'):
+            raise ValueError('backend must be auto, metal or cpu')
         if not isinstance(config["temperature"], (int, float)) or not 0 <= config["temperature"] <= 2:
             raise ValueError("temperature must be between 0 and 2")
         for name in ("engine_path", "model_path"):

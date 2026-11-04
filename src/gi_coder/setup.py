@@ -1,4 +1,5 @@
-"""Repeatable, CPU-only official llama.cpp build."""
+"""Repeatable official llama.cpp build with macOS Metal and CPU fallback."""
+import json
 import shutil
 import subprocess
 import uuid
@@ -6,6 +7,7 @@ from pathlib import Path
 
 from .config import ROOT, CoderError
 from .runtime import LLAMA_COMMIT, discover_engine
+from .backend import wants_metal, metal_device
 
 
 def run(command, **kwargs):
@@ -44,13 +46,28 @@ def prepare_source(source):
 
 
 def ensure_engine(config, root=ROOT, offline=False):
+    build = root / 'third_party/llama.cpp/build'
+    marker = build / '.gi-coder-build.json'
+    metal = wants_metal(config)
+    existing_engine = None
     try:
         engine = discover_engine(config, root)
         version = subprocess.run([str(engine), "--version"], capture_output=True, text=True, check=True)
         if LLAMA_COMMIT[:7] not in version.stdout + version.stderr:
             raise CoderError("Runtime version does not match the pinned llama.cpp commit. "
                              "Move the existing build aside and rerun setup.")
-        return engine
+        existing_engine = engine
+        if not metal or offline or config.get('engine_path'):
+            return engine
+        try:
+            previous = json.loads(marker.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            previous = {}
+        if previous.get('commit') == LLAMA_COMMIT and previous.get('metal_attempted'):
+            return engine  # Includes a previously verified CPU build fallback.
+        if metal_device(engine):
+            return engine
+        print('Updating existing CPU build to enable macOS Metal support.', flush=True)
     except (OSError, subprocess.CalledProcessError) as exc:
         raise CoderError(f"Cannot run llama.cpp: {exc}. Rebuild the runtime; see README.md.") from exc
     except CoderError:
@@ -58,6 +75,9 @@ def ensure_engine(config, root=ROOT, offline=False):
             raise
     for tool in ("git", "cmake"):
         if not shutil.which(tool):
+            if existing_engine is not None:
+                print(f'{tool} is needed for a Metal rebuild; reusing the existing CPU runtime.', flush=True)
+                return existing_engine
             raise CoderError(f"Missing {tool}. Install Git and CMake >=3.20; "
                              "Windows also needs VS 2022 C++ Build Tools. See README.md.")
     source = root / "third_party/llama.cpp"
@@ -69,11 +89,21 @@ def ensure_engine(config, root=ROOT, offline=False):
     if actual != LLAMA_COMMIT:
         raise CoderError(f"Expected llama.cpp {LLAMA_COMMIT}, found {actual}. "
                          "Move your custom checkout aside before running setup.")
-    build = source / "build"
-    run(["cmake", "-S", source, "-B", build, "-DCMAKE_BUILD_TYPE=Release",
-         "-DGGML_CUDA=OFF", "-DGGML_METAL=OFF", "-DGGML_NATIVE=OFF", "-DLLAMA_CURL=OFF",
-         "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_SERVER=ON", "-DBUILD_SHARED_LIBS=OFF"])
-    run(["cmake", "--build", build, "--config", "Release", "--target", "llama-server", "--parallel", "2"])
+    def compile_runtime(use_metal):
+        option = 'ON' if use_metal else 'OFF'
+        run(["cmake", "-S", source, "-B", build, "-DCMAKE_BUILD_TYPE=Release",
+             "-DGGML_CUDA=OFF", f"-DGGML_METAL={option}", f'-DGGML_METAL_EMBED_LIBRARY={option}',
+             "-DGGML_NATIVE=OFF", "-DLLAMA_CURL=OFF", "-DLLAMA_BUILD_TESTS=OFF",
+             "-DLLAMA_BUILD_SERVER=ON", "-DBUILD_SHARED_LIBS=OFF"])
+        run(["cmake", "--build", build, "--config", "Release", "--target", "llama-server", "--parallel", "2"])
+    try:
+        compile_runtime(metal)
+    except CoderError:
+        if not metal:
+            raise
+        print('Metal build failed; building CPU runtime instead.', flush=True)
+        compile_runtime(False)
     engine = discover_engine(config, root)
     run([engine, "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    marker.write_text(json.dumps({'commit': LLAMA_COMMIT, 'metal_attempted': metal}), encoding='utf-8')
     return engine

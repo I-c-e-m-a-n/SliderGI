@@ -1,6 +1,7 @@
 """Owned localhost llama.cpp child. No remote endpoint or user API credentials."""
 import json
 import atexit
+import re
 import secrets
 import socket
 import subprocess
@@ -11,6 +12,7 @@ import urllib.request
 from pathlib import Path
 
 from .config import ROOT, CoderError, installation_path
+from .backend import wants_metal, metal_device
 
 LLAMA_COMMIT = "74d4f5b041ad837153b0e90fc864b8290e01d8d5"
 
@@ -38,6 +40,8 @@ class Runtime:
         self.process = None
         self.log = None
         self.url = None
+        self.backend = 'CPU'
+        self.offloaded_layers = 0
         self.key = secrets.token_hex(24)  # Local process authentication, never a service API key.
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -50,6 +54,18 @@ class Runtime:
 
     def __enter__(self):
         engine = discover_engine(self.config, self.root)
+        device = metal_device(engine) if wants_metal(self.config) else None
+        if wants_metal(self.config) and device is None:
+            print('Metal unavailable in this runtime/device; using CPU.', flush=True)
+        try:
+            return self._start(engine, device, self.config.get('gpu_layers', 99) if device else 0)
+        except (CoderError, OSError):
+            if device is None:
+                raise
+            print('Metal model initialization failed; retrying on CPU.', flush=True)
+            return self._start(engine, None, 0)
+
+    def _start(self, engine, device, layers):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
@@ -58,9 +74,11 @@ class Runtime:
         command = [str(engine), "--model", str(self.model), "--host", "127.0.0.1",
                    "--port", str(port), "--api-key", self.key, "--jinja", "--no-context-shift",
                    "--ctx-size", str(self.config["context_size"]),
-                   "--threads", str(self.config["threads"]), "--gpu-layers", "0",
+                   "--threads", str(self.config["threads"]), "--gpu-layers", str(layers),
                    "--parallel", "1", "--batch-size", "128", "--ubatch-size", "128",
                    "--n-predict", str(self.config["max_tokens"])]
+        if device:
+            command.extend(['--device', device])
         try:
             self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
                                             stdout=self.log, stderr=self.log, start_new_session=True)
@@ -71,6 +89,16 @@ class Runtime:
                     raise CoderError("llama.cpp model loading failed: " + self.log_tail())
                 try:
                     if self.request("/health", timeout=2).get("status") == "ok":
+                        # Health alone proves loading, not GPU offload. Confirm
+                        # actual layer offloading from this pinned engine's log.
+                        self.log.seek(0, 2)
+                        self.log.seek(max(0, self.log.tell() - 1024 * 1024))
+                        logs = self.log.read().decode('utf-8', errors='replace')
+                        counts = re.findall(r'offloaded (\d+)/\d+ layers to GPU', logs)
+                        self.offloaded_layers = int(counts[-1]) if device and counts else 0
+                        self.backend = 'Metal' if self.offloaded_layers > 0 else 'CPU'
+                        print(f'Inference: Local {self.backend}' + (
+                            f' ({self.offloaded_layers} layers offloaded)' if self.offloaded_layers else ''), flush=True)
                         return self
                 except (OSError, ValueError):
                     pass
@@ -103,6 +131,8 @@ class Runtime:
             "max_tokens": self.config["max_tokens"], "temperature": self.config["temperature"],
             "stream": False, "cache_prompt": False, "id_slot": 0}
         if schema is not None:
+            payload['max_tokens'] = self.config.get('assessment_max_tokens', 384)
+            payload['temperature'] = 0
             payload["response_format"] = {"type": "json_schema", "json_schema": {
                 "name": "request_assessment", "strict": True, "schema": schema}}
         started = time.monotonic()
@@ -115,7 +145,7 @@ class Runtime:
             content = choice["message"]["content"]
             if not isinstance(content, str) or not content.strip():
                 raise CoderError("Qwen returned empty source code; no file written")
-            return content, {"seconds": round(time.monotonic() - started, 2), **result.get("usage", {})}
+            return content, {**result.get("usage", {}), "seconds": time.monotonic() - started}
         except urllib.error.HTTPError as exc:
             detail = exc.read(4000).decode("utf-8", errors="replace")
             if exc.code >= 500:

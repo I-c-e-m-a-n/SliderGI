@@ -12,7 +12,7 @@ def string(limit):
 FUNCTION = {'type': 'object', 'additionalProperties': False,
             'properties': {k: string(160) for k in ('name', 'inputs', 'behaviour', 'variables', 'outputs')},
             'required': ['name', 'inputs', 'behaviour', 'variables', 'outputs']}
-SCHEMA = {'type': 'object', 'additionalProperties': False, 'properties': {
+CANONICAL_SCHEMA = {'type': 'object', 'additionalProperties': False, 'properties': {
     'output_type': {'type': 'string', 'enum': ['text', 'code']},
     'objective': string(240),
     'constraints': {'type': 'array', 'items': string(160), 'maxItems': 8},
@@ -25,6 +25,16 @@ SCHEMA = {'type': 'object', 'additionalProperties': False, 'properties': {
     'functions': {'type': 'array', 'items': FUNCTION, 'maxItems': 8}},
     'required': ['output_type', 'objective', 'constraints', 'output_format', 'language',
                  'filename', 'extension', 'complexity', 'revised_prompt', 'functions']}
+TEXT_FIELDS = ('output_type', 'objective', 'constraints', 'complexity', 'revised_prompt')
+TEXT_SCHEMA = {'type': 'object', 'additionalProperties': False,
+               'properties': {key: CANONICAL_SCHEMA['properties'][key] for key in TEXT_FIELDS},
+               'required': list(TEXT_FIELDS)}
+TEXT_SCHEMA['properties']['output_type'] = {'type': 'string', 'enum': ['text']}
+CODE_SCHEMA = {**CANONICAL_SCHEMA, 'properties': {
+    **CANONICAL_SCHEMA['properties'], 'output_type': {'type': 'string', 'enum': ['code']}}}
+# Text still gets a real Qwen assessment and revision; omit only predictable
+# code-only null fields on the wire, then restore the canonical internal shape.
+SCHEMA = {'anyOf': [TEXT_SCHEMA, CODE_SCHEMA]}
 
 
 def validate_schema(value, schema, location='assessment'):
@@ -68,17 +78,15 @@ def assess(runtime, prompt, language=None, filename=None):
     if explicit_language and inferred and explicit_language != inferred:
         raise CoderError('Filename extension conflicts with requested language')
     system = (
-        'Assess the user request; do not answer it or generate code yet. Return ONLY concise JSON matching '
-        'the supplied schema: output_type, objective, constraints, output_format, language, filename, extension, '
-        'complexity, revised_prompt, functions. Decide text versus one source file. Explicit user instructions take priority. '
-        'CLI language or filename means code output; obey these overrides. Otherwise choose the most suitable '
-        'language and descriptive basename/extension. For text use plain_text and null language/filename/extension, '
-        'with empty functions. For code use source_code; summarize functions with inputs, behaviour, important '
-        'variables and outputs (use a module entry if no functions). Use short strings and no more than 3 '
-        'function summaries. Rewrite the objective and constraints into a precise generation prompt. Do not '
-        'add unrelated features, multiple source files, execution steps or tools.')
+        'Assess and revise; do not answer. Return concise schema JSON. Preserve explicit instructions; '
+        'CLI language/filename require code and override guesses. Choose text/plain_text or code/source_code. '
+        'Text: emit only output_type, objective, constraints, complexity, revised_prompt. '
+        'Code: emit all schema fields; choose language, descriptive basename/extension, '
+        'and 1-3 short function/module summaries (name, inputs, behaviour, variables, outputs). '
+        'State objective, constraints, complexity and a precise revised_prompt. For greetings keep fields '
+        'and revision minimal; for complex requests preserve constraints. No extra features, files or tools.')
     user = json.dumps({'request': prompt, 'explicit_language': explicit_language, 'explicit_filename': filename},
-                      ensure_ascii=False)
+                      ensure_ascii=False, separators=(',', ':'))
     raw, stats = runtime.complete(system, user, schema=SCHEMA)
     try:
         if len(raw) > 16000:
@@ -86,7 +94,10 @@ def assess(runtime, prompt, language=None, filename=None):
         data = json.loads(raw, object_pairs_hook=no_duplicates)
     except ValueError as exc:
         raise CoderError('Qwen assessment is not valid JSON; no output written') from exc
-    validate_schema(data, SCHEMA)
+    if isinstance(data, dict) and data.get('output_type') == 'text' and set(data) == set(TEXT_FIELDS):
+        validate_schema(data, TEXT_SCHEMA)
+        data.update(output_format='plain_text', language=None, filename=None, extension=None, functions=[])
+    validate_schema(data, CANONICAL_SCHEMA)
     if data['output_type'] == 'text':
         if language or filename:
             raise CoderError('Assessment ignored explicit code options; retry the request')

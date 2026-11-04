@@ -1,5 +1,45 @@
 # Validation record
 
+## Metal, timings and output-directory fixes — 2026-11-05 (Singapore)
+
+Current full suite: **59 discovered, 55 passed, 4 skipped**. Skips are the two
+opt-in genuine Qwen tests and two legacy Windows launcher tests. Existing tests
+remain passing; the original real smoke test now supplies its temporary output
+directory explicitly to retain that check under the new default.
+
+Executed on Linux/Python 3.12: backend preference/config validation, simulated
+Metal device availability and confirmed layer offload, startup/build CPU
+fallback, one-time migration/reuse of a CPU build, separate assessment token
+budget, deterministic monotonic-clock accuracy, compact text assessment with
+real revision stage, default sibling output creation/reuse, metadata placement,
+explicit overrides, all prior process-residency/context/signal regressions.
+Metal availability and timing values in deterministic tests are mocked, not
+macOS benchmarks. The actual local CPU llama-server device probe also ran.
+
+The text schema was converted successfully using the pinned llama.cpp C++
+JSON-schema-to-grammar implementation linked against the already-built runtime
+libraries (4,810 bytes of generated grammar). Python compilation, shell syntax
+and Git whitespace checks passed. This validates schema conversion, not Qwen's
+ability to produce correct assessments or source code.
+
+Measured structural changes: assessment instruction size decreased from 897 to
+638 characters; text assessments emit five fields rather than ten; JSON prompts
+are compact; the assessment output ceiling defaults to 384 instead of sharing
+generation's 768-token limit. These are input/output-budget reductions, not a
+measured inference speedup. Every request, including greetings, is still assessed
+and revised by Qwen before generation. Complex requests may need a higher
+assessment budget; truncation is reported rather than accepted silently.
+
+Unexecuted: actual macOS Metal build/offload, real Apple/Intel GPU compatibility,
+Mac CPU-versus-Metal benchmarks, and genuine Qwen inference. This environment
+has no Mac hardware or official Qwen weights; HF access remains blocked by the
+previously observed proxy policy. No Mac latency or throughput is claimed.
+README documents on-Mac benchmark and genuine inference commands. GitHub API
+access was checked again and returns Forbidden; feature-branch Git publishing
+works, while API-based PR creation/update remains blocked.
+
+Prior validation records below describe earlier commits and defaults.
+
 ## macOS session and assessment upgrade — 2026-11-05 (Singapore)
 
 Target: macOS only. Runner: Linux x86-64, Python 3.12. No macOS host is

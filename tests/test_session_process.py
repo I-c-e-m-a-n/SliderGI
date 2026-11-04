@@ -64,6 +64,8 @@ except SessionTerminated as exc:
                 try:
                     # Blocking readline is bounded by the runtime's load timeout.
                     line = parent.stdout.readline()
+                    while line.startswith(('Inference: ', 'Metal ')):
+                        line = parent.stdout.readline()
                     self.assertTrue(line.strip().isdigit(), line)
                     child_pid = int(line)
                     parent.send_signal(signum)

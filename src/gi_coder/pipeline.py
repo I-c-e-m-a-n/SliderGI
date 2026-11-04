@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 
 from .assessment import assess
 from .config import ROOT, CoderError
@@ -40,6 +41,18 @@ def skeleton_header(source, language, functions):
 
 def process_request(runtime, prompt, language=None, filename=None, output_dir=None,
                     overwrite=False, confirm=None, root=ROOT):
+    started = time.monotonic()
+    result = _process_request(runtime, prompt, language, filename, output_dir, overwrite, confirm, root)
+    timings = {'assessment': result['statistics']['assessment']['seconds'],
+               'generation': result['statistics']['generation']['seconds'],
+               'total': time.monotonic() - started}
+    result['timings'] = timings
+    print(f'\nAssessment: {timings["assessment"]:.2f}s\nGeneration: {timings["generation"]:.2f}s\n'
+          f'Total: {timings["total"]:.2f}s')
+    return result
+
+
+def _process_request(runtime, prompt, language, filename, output_dir, overwrite, confirm, root):
     if not prompt.strip():
         raise CoderError('Request cannot be empty')
     temporary = root / '.gi-coder/tmp'
@@ -48,8 +61,11 @@ def process_request(runtime, prompt, language=None, filename=None, output_dir=No
     # cancellation and success. No prompts/assessments enter subsequent requests.
     with tempfile.TemporaryDirectory(prefix='request-', dir=temporary) as work:
         print('Assessing request...', flush=True)
+        started = time.monotonic()
         assessment, assessment_stats = assess(runtime, prompt, language, filename)
-        revised = json.dumps({'original_request': prompt, 'assessment': assessment}, ensure_ascii=False)
+        assessment_stats = {**assessment_stats, 'seconds': time.monotonic() - started}
+        revised = json.dumps({'original_request': prompt, 'assessment': assessment},
+                             ensure_ascii=False, separators=(',', ':'))
         for name, content in (('assessment.json', json.dumps(assessment, ensure_ascii=False, indent=2)),
                               ('revised-prompt.json', revised)):
             path = Path(work) / name
@@ -57,13 +73,16 @@ def process_request(runtime, prompt, language=None, filename=None, output_dir=No
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:
                 stream.write(content)
         if assessment['output_type'] == 'text':
+            started = time.monotonic()
             answer, stats = runtime.complete(
-                'Answer the original user request in ordinary English. The assessment is advisory; '
-                'explicit user instructions take priority. Do not produce a source file.', revised)
+                'Answer naturally in ordinary English using the revised prompt and original request. '
+                'Explicit user instructions take priority. Do not produce a source file.', revised)
+            stats = {**stats, 'seconds': time.monotonic() - started}
             print(answer)
             return {'type': 'text', 'text': answer, 'assessment': assessment,
                     'statistics': {'assessment': assessment_stats, 'generation': stats}}
-        path = output_path(assessment['language'], assessment['filename'], output_dir,
+        directory = output_dir if output_dir is not None else root.parent / 'SliderGI_Output'
+        path = output_path(assessment['language'], assessment['filename'], directory,
                            extension=assessment['extension'])
         sidecar = path.with_name(path.name + '.gi-coder.json') if not SPECS.get(
             assessment['language'], {}).get('comment') else None
@@ -77,7 +96,9 @@ def process_request(runtime, prompt, language=None, filename=None, output_dir=No
                     raise CoderError(f'Refusing to overwrite {target}; use --overwrite explicitly')
                 permissions[target] = True
         print('Generating...', flush=True)
+        started = time.monotonic()
         code, stats = runtime.generate(revised, assessment['language'])
+        stats = {**stats, 'seconds': time.monotonic() - started}
         source = extract_source(code, assessment['language'])
         if assessment['language'] == 'json':
             try:
@@ -98,8 +119,7 @@ def process_request(runtime, prompt, language=None, filename=None, output_dir=No
             if created_sidecar:
                 sidecar.unlink(missing_ok=True)
             raise
-        print(f'File created: {path}\nLanguage: {assessment["language"]}\nStatus: Complete\n'
-              f'Statistics: {json.dumps({"assessment": assessment_stats, "generation": stats})}')
+        print(f'File created: {path}\nLanguage: {assessment["language"]}\nStatus: Complete')
         if sidecar:
             print(f'Function metadata: {sidecar}')
         return {'type': 'code', 'path': path, 'assessment': assessment,
