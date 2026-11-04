@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.gi-coder/
+/models/*
+!/models/.gitkeep
+/third_party/llama.cpp/
+/config/local.json
+/build/
+/dist/

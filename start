@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 "$ROOT/scripts/setup.py" --launch "$@"
+elif command -v python >/dev/null 2>&1; then
+    exec python "$ROOT/scripts/setup.py" --launch "$@"
+else
+    echo 'GI-Coder requires Python 3.10+, Git, CMake and a C++ compiler. See README.md.' >&2
+    exit 1
+fi

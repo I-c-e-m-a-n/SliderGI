@@ -1,0 +1,11 @@
+{
+  "model": "7b",
+  "context_size": 2048,
+  "threads": 4,
+  "max_tokens": 768,
+  "temperature": 0.2,
+  "model_path": null,
+  "engine_path": null,
+  "load_timeout": 300,
+  "generation_timeout": 1800
+}
