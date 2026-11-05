@@ -1,0 +1,215 @@
+{
+  "baseline_commit": "d471793a4ba64f836807d73221e510846e2a1374",
+  "note": "Scripted responses; one simulated second per call. wall_seconds measures offline orchestration only.",
+  "before": {
+    "kind": "scripted_offline_verification",
+    "cases": [
+      {
+        "case": "fibonacci_valid_review",
+        "expected_delivery": true,
+        "delivered": true,
+        "layers": {},
+        "model_calls": 3,
+        "simulated_inference_seconds": 3.0,
+        "wall_seconds": 0.01413414599664975,
+        "expected_outcome_met": true
+      },
+      {
+        "case": "fibonacci_bad_citation",
+        "expected_delivery": true,
+        "delivered": false,
+        "error": "Review-evidence validation failed: Requirement review cited nonexistent or non-executable source evidence",
+        "model_calls": 4,
+        "simulated_inference_seconds": 4.0,
+        "wall_seconds": 0.008135436997690704,
+        "expected_outcome_met": false
+      },
+      {
+        "case": "calculator_bad_citation",
+        "expected_delivery": true,
+        "delivered": false,
+        "error": "Review-evidence validation failed: Requirement review cited nonexistent or non-executable source evidence",
+        "model_calls": 4,
+        "simulated_inference_seconds": 4.0,
+        "wall_seconds": 0.007370405000983737,
+        "expected_outcome_met": false
+      },
+      {
+        "case": "clock_bad_citation",
+        "expected_delivery": true,
+        "delivered": false,
+        "error": "Review-evidence validation failed: Requirement review cited nonexistent or non-executable source evidence",
+        "model_calls": 9,
+        "simulated_inference_seconds": 9.0,
+        "wall_seconds": 0.05049266800051555,
+        "expected_outcome_met": false
+      },
+      {
+        "case": "undefined_global",
+        "expected_delivery": false,
+        "delivered": false,
+        "error": "Source correction exhausted: Undefined global/import: missing_name",
+        "model_calls": 3,
+        "simulated_inference_seconds": 3.0,
+        "wall_seconds": 0.005691336002200842,
+        "expected_outcome_met": true
+      },
+      {
+        "case": "genuine_requirement_failure",
+        "expected_delivery": false,
+        "delivered": false,
+        "error": "Source correction exhausted: Source requirement review failed: Source implements the requirement",
+        "model_calls": 5,
+        "simulated_inference_seconds": 5.0,
+        "wall_seconds": 0.007722216003458016,
+        "expected_outcome_met": true
+      }
+    ],
+    "valid_task_delivery_rate": 0.25,
+    "expected_outcome_rate": 0.5
+  },
+  "after": {
+    "kind": "scripted_offline_verification",
+    "cases": [
+      {
+        "case": "fibonacci_valid_review",
+        "expected_delivery": true,
+        "delivered": true,
+        "layers": {
+          "syntax": {
+            "status": "passed"
+          },
+          "static_analysis": {
+            "status": "passed",
+            "scope": "syntax_and_structure"
+          },
+          "semantic_review": {
+            "status": "passed",
+            "method": "model_review",
+            "diagnostics": []
+          },
+          "runtime_testing": {
+            "status": "not_run",
+            "reason": "Generated code is never executed"
+          }
+        },
+        "model_calls": 3,
+        "simulated_inference_seconds": 3.0,
+        "wall_seconds": 0.008263668001745827,
+        "expected_outcome_met": true
+      },
+      {
+        "case": "fibonacci_bad_citation",
+        "expected_delivery": true,
+        "delivered": true,
+        "layers": {
+          "syntax": {
+            "status": "passed"
+          },
+          "static_analysis": {
+            "status": "passed",
+            "scope": "syntax_and_structure"
+          },
+          "semantic_review": {
+            "status": "inconclusive",
+            "method": "model_review",
+            "diagnostics": [
+              "Requirement review cited nonexistent or non-executable source evidence"
+            ]
+          },
+          "runtime_testing": {
+            "status": "not_run",
+            "reason": "Generated code is never executed"
+          }
+        },
+        "model_calls": 3,
+        "simulated_inference_seconds": 3.0,
+        "wall_seconds": 0.006665982000413351,
+        "expected_outcome_met": true
+      },
+      {
+        "case": "calculator_bad_citation",
+        "expected_delivery": true,
+        "delivered": true,
+        "layers": {
+          "syntax": {
+            "status": "passed"
+          },
+          "static_analysis": {
+            "status": "passed",
+            "scope": "syntax_and_structure"
+          },
+          "semantic_review": {
+            "status": "inconclusive",
+            "method": "model_review",
+            "diagnostics": [
+              "Requirement review cited nonexistent or non-executable source evidence"
+            ]
+          },
+          "runtime_testing": {
+            "status": "not_run",
+            "reason": "Generated code is never executed"
+          }
+        },
+        "model_calls": 3,
+        "simulated_inference_seconds": 3.0,
+        "wall_seconds": 0.006456615999923088,
+        "expected_outcome_met": true
+      },
+      {
+        "case": "clock_bad_citation",
+        "expected_delivery": true,
+        "delivered": true,
+        "layers": {
+          "syntax": {
+            "status": "passed"
+          },
+          "static_analysis": {
+            "status": "passed",
+            "scope": "static_integration"
+          },
+          "semantic_review": {
+            "status": "inconclusive",
+            "method": "model_review",
+            "diagnostics": [
+              "Requirement review cited nonexistent or non-executable source evidence",
+              "Requirement review cited nonexistent or non-executable source evidence",
+              "Requirement review cited nonexistent or non-executable source evidence",
+              "Requirement review cited nonexistent or non-executable source evidence"
+            ]
+          },
+          "runtime_testing": {
+            "status": "not_run",
+            "reason": "Generated code is never executed"
+          }
+        },
+        "model_calls": 8,
+        "simulated_inference_seconds": 8.0,
+        "wall_seconds": 0.05176737599686021,
+        "expected_outcome_met": true
+      },
+      {
+        "case": "undefined_global",
+        "expected_delivery": false,
+        "delivered": false,
+        "error": "Source correction exhausted: repeated failed source: Undefined global/import: missing_name",
+        "model_calls": 3,
+        "simulated_inference_seconds": 3.0,
+        "wall_seconds": 0.004375371994683519,
+        "expected_outcome_met": true
+      },
+      {
+        "case": "genuine_requirement_failure",
+        "expected_delivery": false,
+        "delivered": false,
+        "error": "Source correction exhausted: repeated failed source: Source requirement review failed: Source implements the requirement; Always returns 42",
+        "model_calls": 4,
+        "simulated_inference_seconds": 4.0,
+        "wall_seconds": 0.005030597996665165,
+        "expected_outcome_met": true
+      }
+    ],
+    "valid_task_delivery_rate": 1.0,
+    "expected_outcome_rate": 1.0
+  }
+}

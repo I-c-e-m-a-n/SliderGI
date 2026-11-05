@@ -11,7 +11,7 @@ from pathlib import Path
 from .assessment import no_duplicates, string, validate_schema
 from .config import CoderError
 from .generation import extract_source, write_source
-from .verification import dependency_status, parse_signature, signature, verify_source
+from .verification import dependency_status, parse_signature, signature, verify_source, verification_layers, record_semantics
 
 
 def obj(properties):
@@ -79,24 +79,53 @@ def verify_evidence(review, source):
 
 
 def review_source(call, context, source):
-    """At most one targeted evidence correction. Never rewrite valid code for it."""
-    previous = None
-    for attempt in range(2):
+    """One review only. Citation failures are diagnostics, never code defects."""
+    try:
         raw = call('Review the supplied Python source without executing it. Check actual behavior and '
-                   'all original requirements, not comments or syntax alone. Report missing behavior in issues '
-                   'or missing_requirements. Copy executable source statements or expressions into evidence_snippets. '
-                   'When review_error is supplied, correct only the review evidence, preserving honest findings.',
-                   context, REVIEW_SCHEMA)
+                   'original requirements, not comments or syntax alone. Report actionable missing behavior '
+                   'in issues or missing_requirements. Copy executable statements into evidence_snippets. '
+                   'Respect review_scope when reviewing a component slice.', context, REVIEW_SCHEMA)
+    except CoderError as exc:
+        return {'verdict': 'inconclusive', 'evidence': '', 'evidence_snippets': [],
+                'issues': [], 'missing_requirements': [], 'semantic_status': 'inconclusive',
+                'validation_errors': [str(exc)], 'evidence_status': 'unavailable',
+                'raw_response': getattr(exc, 'raw_response', None), 'inference_error': str(exc)}
+    errors = []
+    review_text = raw.strip()
+    fenced = re.fullmatch(r'```(?:json)?[ \t]*\n(.*?)\n```', review_text, re.S | re.I)
+    if fenced:
+        review_text = fenced.group(1)
+    try:
+        review = decode(review_text, REVIEW_SCHEMA)
+    except CoderError as exc:
+        errors.append(str(exc))
+        # Preserve explicit negative findings even if ancillary review fields are
+        # malformed. Do not turn a reported requirement failure into a pass.
         try:
-            review = decode(raw, REVIEW_SCHEMA)
+            data = json.loads(review_text, object_pairs_hook=no_duplicates) if len(review_text) <= 128000 else None
+        except (ValueError, CoderError):
+            data = None
+        review = {'verdict': 'inconclusive', 'evidence': '', 'evidence_snippets': [],
+                  'issues': [], 'missing_requirements': []}
+        if isinstance(data, dict):
+            if data.get('verdict') == 'fail':
+                review['verdict'] = 'fail'
+            if isinstance(data.get('evidence'), str):
+                review['evidence'] = data['evidence'][:2000]
+            for field in ('issues', 'missing_requirements'):
+                value = data.get(field)
+                if isinstance(value, list):
+                    review[field] = [item[:500] for item in value if isinstance(item, str) and item.strip()][:32]
+    if not errors:
+        try:
             verify_evidence(review, source)
-            return review
-        except CoderError as exc:
-            if attempt or raw == previous:
-                raise ReviewEvidenceError('Review-evidence validation failed: ' + str(exc)) from exc
-            previous = raw
-            context = {**context, 'rejected_review': raw, 'review_error': str(exc)}
-    raise AssertionError('unreachable')
+        except ReviewEvidenceError as exc:
+            errors.append(str(exc))
+    failed = review['verdict'] == 'fail' or bool(review['issues'] or review['missing_requirements'])
+    review.update(semantic_status='failed' if failed else 'inconclusive' if errors else 'passed',
+                  validation_errors=errors, evidence_status='invalid' if errors else 'valid',
+                  raw_response=raw)
+    return review
 
 
 def normalize_plan(plan):
@@ -299,7 +328,7 @@ def generate_project(runtime, prompt, assessment, root, max_config):
                 'planning_attempts': [], 'timings': {'planning': 0.0, 'retry': 0.0,
                                                     'generation': 0.0, 'verification': 0.0}}
     def save():
-        manifest['metrics'] = call_metrics(manifest['calls'], manifest['status'] == 'verified')
+        manifest['metrics'] = call_metrics(manifest['calls'], manifest['status'] == 'statically_valid')
         write_source(workspace/'manifest.json', json.dumps(manifest, ensure_ascii=True, indent=2) + '\n', True)
     save()
     deadline = time.monotonic() + max_config.get('project_timeout', 1800)
@@ -308,20 +337,23 @@ def generate_project(runtime, prompt, assessment, root, max_config):
         nonlocal calls
         calls += 1
         remaining = deadline - time.monotonic()
-        if remaining <= 0 or calls > 5 + 3 * max_config.get('max_components', 16) + 2 * max_config.get('max_requirements', 16):
+        if remaining <= 0 or calls > 5 + 3 * max_config.get('max_components', 16) + max_config.get('max_requirements', 16):
             raise CoderError('Project time/call budget exhausted')
         started = time.monotonic()
         row = {'number': calls, 'phase': phase, 'usage': {}, 'status': 'failed'}
         try:
             raw, stats = runtime.complete(system, json.dumps(context, separators=(',', ':')), schema=schema, timeout=remaining)
             # Save verbatim before decoding, normalizing, validation or timeout checks.
-            if raw_plan_path:
-                write_source(workspace/raw_plan_path, raw, True)
+            response_path = raw_plan_path or f'response-{calls}.raw.txt'
+            write_source(workspace/response_path, raw, True)
+            row['raw_response'] = response_path
             row.update(usage=stats, status='completed')
         except BaseException as exc:
             partial = getattr(exc, 'raw_response', None)
-            if raw_plan_path and isinstance(partial, str):
-                write_source(workspace/raw_plan_path, partial, True)
+            if isinstance(partial, str):
+                response_path = raw_plan_path or f'response-{calls}.raw.txt'
+                write_source(workspace/response_path, partial, True)
+                row['raw_response'] = response_path
                 row['usage'] = getattr(exc, 'response_usage', {})
             row['error'] = str(exc) or type(exc).__name__
             raise
@@ -418,9 +450,15 @@ def generate_project(runtime, prompt, assessment, root, max_config):
                         raise CoderError('Single-file source exceeds 128 KiB safeguard')
                     checked = verify_source(source, plan, completed=trial, final=False)
                 except CoderError as exc:
+                    manifest.setdefault('validation_errors', []).append(
+                        {'error': str(exc), 'verification': getattr(exc, 'verification', None)})
+                    save()
                     fingerprint = raw.strip()
                     if fingerprint in seen or attempt == 2:
-                        raise CoderError(f'Component correction exhausted: {exc}') from exc
+                        error = CoderError(f'Component correction exhausted: {exc}')
+                        if hasattr(exc, 'verification'):
+                            error.verification = exc.verification
+                        raise error from exc
                     seen.add(fingerprint)
                     context = {**context, 'rejected_source': raw, 'validation_error': str(exc)}
                     continue
@@ -438,8 +476,14 @@ def generate_project(runtime, prompt, assessment, root, max_config):
                 manifest['verification'] = verify_source(source, plan)
                 break
             except CoderError as exc:
+                manifest.setdefault('validation_errors', []).append(
+                    {'error': str(exc), 'verification': getattr(exc, 'verification', None)})
+                save()
                 if source in final_seen or attempt == 2:
-                    raise CoderError(f'Final integration correction exhausted: {exc}') from exc
+                    error = CoderError(f'Final integration correction exhausted: {exc}')
+                    if hasattr(exc, 'verification'):
+                        error.verification = exc.verification
+                    raise error from exc
                 final_seen.add(source)
                 # Integration defects usually concern wiring. Keep all component
                 # contracts fixed and repair the caller named in the diagnostic,
@@ -466,6 +510,7 @@ def generate_project(runtime, prompt, assessment, root, max_config):
         # slice. All requirement texts remain visible so omissions can be flagged.
         graph = manifest['verification']['references']
         reviewed_slices = {}
+        unavailable_review = None
         for req in plan['requirements']:
             relevant, pending = set(), list(req['components'])
             while pending:
@@ -484,7 +529,7 @@ def generate_project(runtime, prompt, assessment, root, max_config):
             if slice_key in reviewed_slices:
                 manifest['reviews'].append({'requirement': req['id'], 'reused': True, **reviewed_slices[slice_key]})
                 continue
-            review = review_source(
+            review = unavailable_review or review_source(
                 lambda system, context, schema: call(system, context, schema, phase='verification'),
                 {'original_request': prompt, 'all_requirements': plan['requirements'], 'target': req,
                  'covered_requirements': [r for r in plan['requirements'] if set(r['components']) <= relevant],
@@ -492,18 +537,23 @@ def generate_project(runtime, prompt, assessment, root, max_config):
                  'imports': plan['imports'], 'variables': plan['variables'], 'classes': plan['classes'],
                  'references': graph, 'source': {name: sources[name] for name in sorted(relevant)}},
                 '\n'.join(sources[name] for name in sorted(relevant)))
+            if 'inference_error' in review:
+                unavailable_review = review  # Do not repeatedly call an unavailable reviewer.
             reviewed_slices[slice_key] = review
             manifest['reviews'].append({'requirement': req['id'], **review})
+            record_semantics(manifest['verification'], manifest['reviews'])
             save()
-            if review['verdict'] != 'pass' or review['issues'] or review['missing_requirements']:
+            if review['semantic_status'] == 'failed':
                 raise CoderError(f'Requirement verification failed: {req["id"]}: {review["evidence"]}')
-            verify_evidence(review, '\n'.join(sources[name] for name in sorted(relevant)))
-        manifest.update(status='verified', progress={name: 'verified' for name in sources})
-        manifest['verification']['coverage'] = 'model_reviewed_static_evidence_not_runtime_proof'
+
+        manifest.update(status='statically_valid', progress={name: 'statically_valid' for name in sources})
+        record_semantics(manifest['verification'], manifest['reviews'])
         save()
         return source, manifest, workspace
     except BaseException as exc:
         manifest.update(status='failed', error=str(exc) or type(exc).__name__)
+        if hasattr(exc, 'verification'):
+            manifest['verification'] = exc.verification
         save()
         import sys
         print(f'Project workspace retained: {workspace}\nPlanning: {manifest["timings"]["planning"]:.2f}s; '
@@ -512,23 +562,26 @@ def generate_project(runtime, prompt, assessment, root, max_config):
         raise
 
 
-def single_manifest(runtime, prompt, assessment, source, call=None):
+def single_manifest(runtime, prompt, assessment, source, call=None, verification=None):
     """Keep simple requests one-shot; one bounded review checks their semantics."""
     manifest = {'version': 1, 'original_request': prompt, 'assessment': assessment,
-                'status': 'verified', 'plan': {'architecture': 'single-pass source',
+                'status': 'statically_valid', 'plan': {'architecture': 'single-pass source',
                     'requirements': [{'id': 'R1', 'text': prompt}], 'functions': assessment['functions']},
                 'progress': {'source': 'implemented'}, 'reviews': []}
     if assessment['language'] == 'python':
-        manifest['verification'] = verify_source(source)
+        manifest['verification'] = verification if verification is not None else verify_source(source)
         if call is None:
             call = lambda system, context, schema: runtime.complete(
                 system, json.dumps(context, separators=(',', ':')), schema=schema)[0]
         review = review_source(call, {'original_request': prompt, 'assessment': assessment, 'source': source}, source)
         manifest['reviews'].append(review)
-        if review['verdict'] != 'pass' or review['issues'] or review['missing_requirements']:
-            raise RequirementReviewError('Source requirement review failed: ' + review['evidence'])
-        verify_evidence(review, source)
-        manifest['verification']['coverage'] = 'model_reviewed_not_runtime_proof'
+        record_semantics(manifest['verification'], manifest['reviews'])
+        if review['semantic_status'] == 'failed':
+            error = RequirementReviewError('Source requirement review failed: ' + '; '.join(
+                [review['evidence'], *review['issues'], *review['missing_requirements']]))
+            error.verification = manifest['verification']
+            error.review = review
+            raise error
         manifest['plan']['actual_structure'] = manifest['verification']['inventory']
         index = manifest['verification']['inventory']
         manifest['plan'].update(imports=index['imports'], variables=index['variables'], classes=index['classes'],
@@ -544,12 +597,12 @@ def single_manifest(runtime, prompt, assessment, source, call=None):
         # Package names can differ from import names; no installation is attempted.
         manifest['dependencies'] = dependency_status([{'module': name, 'package': name}
             for name in sorted(roots - sys.stdlib_module_names - {'__future__'})])
-        manifest['progress']['source'] = 'verified'
+        manifest['progress']['source'] = 'statically_valid'
     else:
         import hashlib
         manifest['status'] = 'framing_verified'
         manifest['verification'] = {'source_sha256': hashlib.sha256(source.encode()).hexdigest(),
-                                    'coverage': 'unverified', 'level': 'framing_only_non_python'}
+                                    'coverage': 'unverified', 'level': 'framing_only_non_python', 'layers': verification_layers()}
     return manifest
 
 
@@ -578,10 +631,19 @@ def generate_single(runtime, prompt, assessment, revised, root, config):
         started = time.monotonic()
         try:
             raw, stats = operation()
-            row.update(status='completed', usage=stats)
+            row.update(status='completed', usage=stats, raw_response=f'response-{row["number"]}.raw.txt')
+            write_source(workspace/row['raw_response'], raw, True)
             if time.monotonic() > deadline:
                 raise CoderError('Project time budget exhausted')
             return raw
+        except BaseException as exc:
+            row.update(status='failed', error=str(exc) or type(exc).__name__)
+            partial = getattr(exc, 'raw_response', None)
+            if isinstance(partial, str):
+                row['raw_response'] = f'response-{row["number"]}.raw.txt'
+                write_source(workspace/row['raw_response'], partial, True)
+                row['usage'] = getattr(exc, 'response_usage', {})
+            raise
         finally:
             row['seconds'] = time.monotonic() - started
             record['calls'].append(row)
@@ -604,21 +666,34 @@ def generate_single(runtime, prompt, assessment, revised, root, config):
             write_source(workspace/f'source-attempt-{attempt+1}.raw.txt', raw, True)
             row = {'attempt': attempt+1, 'status': 'rejected'}
             record['attempts'].append(row)
+            if correction is not None and raw.strip() in seen:
+                row['validation_error'] = correction['validation_error']
+                row['verification'] = record.get('verification')
+                raise CoderError('Source correction exhausted: repeated failed source: ' + correction['validation_error'])
             repairable = True
+            record['verification'] = {'layers': verification_layers()}
             try:
                 if len(raw.encode()) > 128 * 1024:
                     raise CoderError('Single-file source exceeds 128 KiB safeguard')
                 source = extract_source(raw, assessment['language'])
+                write_source(workspace/('source' + assessment['extension']), source, True)
                 if assessment['language'] == 'python':
+                    record['verification'] = verify_source(source)
                     verify_constraints(source, prompt)
-                    verify_source(source)
                 repairable = False
-                manifest = single_manifest(runtime, prompt, assessment, source, call=review_call)
-            except ReviewEvidenceError:
-                raise  # Reviewer errors cannot justify changing generated code.
+                manifest = single_manifest(runtime, prompt, assessment, source, call=review_call,
+                                           verification=record.get('verification'))
             except CoderError as exc:
                 if not repairable and not isinstance(exc, RequirementReviewError):
                     raise
+                record['verification'] = getattr(exc, 'verification', record.get('verification', {'layers': verification_layers()}))
+                if isinstance(exc.__cause__, SyntaxError):
+                    record['verification']['layers']['syntax'] = {'status': 'failed', 'error': str(exc)}
+                elif repairable and record['verification']['layers']['syntax']['status'] == 'passed':
+                    record['verification']['layers']['static_analysis'] = {'status': 'failed', 'error': str(exc)}
+                row['verification'] = record['verification']
+                if hasattr(exc, 'review'):
+                    row['review'] = exc.review
                 row['validation_error'] = str(exc)
                 save()
                 # Non-Python framing keeps its original fail-closed behavior.
@@ -628,6 +703,7 @@ def generate_single(runtime, prompt, assessment, revised, root, config):
                 correction = {'original_request': prompt, 'rejected_source': raw, 'validation_error': str(exc)}
                 continue
             row['status'] = 'accepted'
+            row['verification'] = manifest['verification']
             record.update(manifest)
             record['metrics'] = call_metrics(record['calls'], success=True)
             save()

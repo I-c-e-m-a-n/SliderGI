@@ -1,5 +1,8 @@
 # Reliability changes and regression benchmarks
 
+The current verification behavior and benchmark results are documented in
+[verification-pipeline.md](verification-pipeline.md).
+
 The source pipeline retains one resident inference process and fresh, stateless
 request contexts. Generated programs are parsed and compiled, never imported or
 executed. Dependencies reported in manifests are never installed automatically.
@@ -30,9 +33,10 @@ used during normalization.
   Correction context includes the rejected source and specific validation error.
 - Final integration: at most two corrections of one component while retaining
   all plan contracts. Disconnected functionality targets the entrypoint.
-- Review responses: at most one evidence correction. AST-equivalent whitespace
-  and quote variations normalize locally. Invented/comment-only evidence remains
-  invalid. A reviewer contract error never triggers source regeneration.
+- Review responses: one call per distinct source slice. AST-equivalent whitespace
+  and quote variations normalize locally. Citation/formatting errors are retained
+  as inconclusive semantic results and do not block statically valid delivery.
+  Genuine requirement findings remain failures even with malformed citations.
 - Inference, cancellation, context-capacity and transport failures propagate;
   they do not become source-repair retries.
 - Projects retain a wall-time deadline, source-size limits and an aggregate
@@ -89,7 +93,7 @@ usage. Representative deterministic call budgets (including assessment):
 | Small three-function calculator | plan plus components/reviews | 3 | Direct generation, no planning |
 | Clock fixture | 11 | 8 | Five components, one integrated review |
 | Fibonacci syntax/name correction | previously aborts | 4 | One targeted repair, then review |
-| Invented evidence, corrected | previously aborts | 4 | Review repaired; source generated once |
+| Invented evidence | previously aborts | 3 | Delivered as semantic review inconclusive |
 | Repeated invalid source | previously aborts | 3 | Fails closed after one correction |
 
 Token counts in the synthetic fixture are 30 per call. These are protocol

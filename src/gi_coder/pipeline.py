@@ -122,13 +122,12 @@ def _process_request(runtime, prompt, language, filename, output_dir, overwrite,
             except ValueError as exc:
                 raise CoderError(f'Generated JSON is invalid: {exc}; no file written') from exc
         source, metadata = skeleton_header(source, assessment['language'], assessment['functions'])
-        if incremental:
-            manifest['verification'] = {**verify_source(source, manifest['plan']),
-                'coverage': 'model_reviewed_static_evidence_not_runtime_proof'}
-        elif assessment['language'] == 'python':
-            # Comments do not change static findings, but the delivered hash must match.
-            manifest['verification'] = {**verify_source(source),
-                'coverage': manifest['verification']['coverage']}
+        if assessment['language'] == 'python':
+            # Comments alter the delivered hash, not the independent review result.
+            checked = verify_source(source, manifest['plan'] if incremental else None)
+            checked['layers']['semantic_review'] = manifest['verification']['layers']['semantic_review']
+            checked['coverage'] = manifest['verification']['coverage']
+            manifest['verification'] = checked
         import hashlib
         manifest['verification']['source_sha256'] = hashlib.sha256(source.encode()).hexdigest()
         stats = {**stats, 'seconds': time.monotonic() - started}
@@ -167,6 +166,10 @@ def _process_request(runtime, prompt, language, filename, output_dir, overwrite,
         if backup:
             backup.unlink()
         print(f'File created: {path}\nLanguage: {assessment["language"]}\nStatus: Complete')
+        layers = manifest['verification']['layers']
+        print('Verification: ' + '; '.join(f'{name}={value["status"]}' for name, value in layers.items()))
+        if layers['semantic_review']['status'] == 'inconclusive':
+            print('Delivered statically valid code; semantic review is inconclusive. Runtime behavior is untested.')
         if sidecar:
             print(f'Project manifest: {sidecar}')
         if workspace:
@@ -175,7 +178,7 @@ def _process_request(runtime, prompt, language, filename, output_dir, overwrite,
             missing = [d['package'] for d in manifest.get('dependencies', []) if d['installed_version'] is None]
             if missing:
                 print('Dependencies not installed (not installed automatically): ' + ', '.join(missing))
-        result = {'type': 'code', 'path': path, 'assessment': assessment, 'metrics': manifest['metrics'],
+        result = {'type': 'code', 'path': path, 'assessment': assessment, 'metrics': manifest['metrics'], 'verification': manifest['verification'],
                   'statistics': {'assessment': assessment_stats, 'generation': stats}}
         if incremental:
             result['project_timings'] = dict(manifest['timings'])

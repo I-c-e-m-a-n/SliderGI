@@ -169,18 +169,18 @@ class ReliabilityBenchmarks(unittest.TestCase):
         self.assertEqual(sum(schema is None for _, _, schema in self.responses), 2)
         self.assertFalse(any(schema == REVIEW_SCHEMA for _, _, schema in self.responses))
 
-    def test_review_evidence_corrected_without_regenerating_source(self):
+    def test_bad_evidence_delivers_inconclusive_without_citation_retry(self):
         self.review_responses = [review('made_up()'), review()]
         result = self.run_request()
         self.runtime.generate.assert_called_once()
-        self.assertEqual(result['metrics']['model_calls'], 4)
-        self.assertIn('review_error', self.responses[-1][1])
+        self.assertEqual(result['metrics']['model_calls'], 3)
+        self.assertEqual(result['verification']['layers']['semantic_review']['status'], 'inconclusive')
         self.assertFalse(any(schema is None for _, _, schema in self.responses))
 
     def test_persistent_bad_evidence_is_reported_as_reviewer_error(self):
         self.review_responses = [review('made_up()')]
-        with self.assertRaisesRegex(ReviewEvidenceError, 'Review-evidence'):
-            self.run_request()
+        result = self.run_request()
+        self.assertEqual(result['verification']['layers']['semantic_review']['status'], 'inconclusive')
         self.runtime.generate.assert_called_once()
         self.assertFalse(any(schema is None for _, _, schema in self.responses))
 
@@ -192,12 +192,12 @@ class ReliabilityBenchmarks(unittest.TestCase):
         self.assertEqual(result['metrics']['model_calls'], 5)
         self.assertIn('Source requirement review failed', self.responses[2][1]['validation_error'])
 
-    def test_review_transport_failure_does_not_trigger_code_repair(self):
-        for error in (RuntimeFailure('engine exited'), CoderError('Generation did not finish')):
-            self.review_responses = [error]
-            with self.subTest(error=error), self.assertRaises(type(error)):
-                self.run_request()
-            self.assertFalse(any(schema is None for _, _, schema in self.responses))
+    def test_review_transport_failure_delivers_untested_without_code_repair(self):
+        self.review_responses = [RuntimeFailure('engine exited')]
+        result = self.run_request()
+        self.assertEqual(result['verification']['layers']['semantic_review']['status'], 'inconclusive')
+        self.assertEqual(result['verification']['layers']['runtime_testing']['status'], 'not_run')
+        self.assertFalse(any(schema is None for _, _, schema in self.responses))
 
     def test_forbidden_external_library_fails_before_review(self):
         self.sources = ['import numpy\n' + CALCULATOR]

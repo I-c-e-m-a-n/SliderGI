@@ -29,7 +29,7 @@ class RealClockTest(unittest.TestCase):
                 self.assertIsNone(runtime.process.poll())
             py_compile.compile(str(result['path']), doraise=True)
             manifest = json.loads(result['path'].with_name('clock.py.gi-coder.json').read_text())
-            self.assertEqual(manifest['status'], 'verified')
+            self.assertEqual(manifest['status'], 'statically_valid')
             self.assertGreater(len(manifest['plan']['components']), 1)
             self.assertTrue(manifest['reviews'])
             self.assertEqual(manifest['original_request'], REQUEST)

@@ -27,10 +27,11 @@ def parse_signature(text):
         raise CoderError(f'Invalid component signature: {text}') from exc
 
 
-def inventory(source):
+def inventory(source, tree=None):
     try:
-        tree = ast.parse(source)
-        compile(tree, '<generated>', 'exec')  # Compile only; never execute generated code.
+        if tree is None:
+            tree = ast.parse(source)
+            compile(tree, '<generated>', 'exec')  # Compile only; never execute generated code.
     except (SyntaxError, ValueError) as exc:
         raise CoderError(f'Integrated Python syntax error: {exc}') from exc
     functions, classes, variables, nodes = {}, {}, {}, {}
@@ -102,8 +103,8 @@ def references(nodes, classes):
     return graph
 
 
-def verify_source(source, plan=None, completed=None, final=True):
-    index, nodes, tree = inventory(source)
+def _verify_source(source, plan=None, completed=None, final=True, tree=None):
+    index, nodes, tree = inventory(source, tree)
     check_globals(source, {c['name'] for c in plan['components'] if '.' not in c['name']} if plan else ())
     for name, node in nodes.items():
         body = [n for n in node.body if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str))]
@@ -222,3 +223,44 @@ def check_globals(source, allowed=()):
         for child in scope.get_children():
             check(child)
     check(table)
+
+
+def verification_layers():
+    return {'syntax': {'status': 'not_run'}, 'static_analysis': {'status': 'not_run'},
+            'semantic_review': {'status': 'not_run'},
+            'runtime_testing': {'status': 'not_run', 'reason': 'Generated code is never executed'}}
+
+
+def verify_source(source, plan=None, completed=None, final=True):
+    """Report syntax and static results independently, including on rejection."""
+    layers = verification_layers()
+    try:
+        tree = ast.parse(source)
+        compile(tree, '<generated>', 'exec')
+    except (SyntaxError, ValueError) as exc:
+        layers['syntax'] = {'status': 'failed', 'error': str(exc)}
+        error = CoderError(f'Integrated Python syntax error: {exc}')
+        error.verification = {'layers': layers}
+        raise error from exc
+    layers['syntax'] = {'status': 'passed'}
+    try:
+        result = _verify_source(source, plan, completed, final, tree)
+    except CoderError as exc:
+        layers['static_analysis'] = {'status': 'failed', 'error': str(exc)}
+        exc.verification = {'layers': layers}
+        raise
+    layers['static_analysis'] = {'status': 'passed', 'scope': result['level']}
+    result['layers'] = layers
+    return result
+
+
+def record_semantics(verification, reviews):
+    """A model opinion never implies runtime validation."""
+    statuses = {r['semantic_status'] for r in reviews}
+    status = ('failed' if 'failed' in statuses else 'inconclusive' if 'inconclusive' in statuses
+              else 'passed' if statuses else 'not_run')
+    verification['layers']['semantic_review'] = {'status': status, 'method': 'model_review',
+        'diagnostics': [error for r in reviews for error in r.get('validation_errors', [])]}
+    verification['coverage'] = ('semantic_review_inconclusive_not_runtime_tested' if status == 'inconclusive'
+                                else 'model_reviewed_not_runtime_proof')
+    return status

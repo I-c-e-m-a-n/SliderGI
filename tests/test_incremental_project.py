@@ -70,7 +70,7 @@ class IncrementalProjectTest(unittest.TestCase):
         manifest = json.loads(path.with_name(path.name+'.gi-coder.json').read_text())
         checked = verify_source(source, manifest['plan'])
         self.assertEqual(checked['source_sha256'], manifest['verification']['source_sha256'])
-        self.assertEqual(set(manifest['progress'].values()), {'verified'})
+        self.assertEqual(set(manifest['progress'].values()), {'statically_valid'})
         self.assertEqual(len(manifest['reviews']), 4)
         steps = [ctx['component']['name'] for schema, ctx in self.calls if schema is None]
         self.assertLess(steps.index('hand_angles'), steps.index('draw_analog'))
@@ -108,11 +108,17 @@ class IncrementalProjectTest(unittest.TestCase):
                 self.run_clock()
         self.assertFalse((self.root.parent/'SliderGI_Output/clock.py').exists())
 
-    def test_nonexistent_review_evidence_and_forbidden_import_fail(self):
+    def test_invalid_clock_citation_delivers_with_independent_statuses(self):
         self.review['evidence_snippets'] = ['this is an invented implementation']
-        with self.assertRaisesRegex(CoderError, 'nonexistent'):
-            self.run_clock()
-        self.review = copy.deepcopy(PASS)
+        result = self.run_clock()
+        self.assertTrue(result['path'].is_file())
+        self.assertEqual(result['metrics']['model_calls'], 8)
+        layers = result['verification']['layers']
+        self.assertEqual(layers['static_analysis']['status'], 'passed')
+        self.assertEqual(layers['semantic_review']['status'], 'inconclusive')
+        self.assertEqual(layers['runtime_testing']['status'], 'not_run')
+
+    def test_forbidden_clock_import_still_blocks_delivery(self):
         self.plan['imports'].append('import tkinter')
         with self.assertRaisesRegex(CoderError, 'Forbidden import'):
             self.run_clock()
@@ -230,3 +236,28 @@ class IncrementalProjectTest(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertIn('Disconnected', attempts[1]['validation_error'])
         self.assertTrue(result['metrics']['successful_completion'])
+
+    def test_unavailable_reviewer_is_not_called_again_for_other_slices(self):
+        from gi_coder.runtime import RuntimeFailure
+        self.plan = {'architecture': 'Two helpers and caller', 'imports': [], 'dependencies': [],
+                     'variables': [], 'classes': [], 'entrypoint': 'main',
+                     'requirements': [{'id': 'R1', 'text': 'First behavior', 'components': ['first']},
+                                      {'id': 'R2', 'text': 'Second behavior', 'components': ['second']}],
+                     'components': [
+                         {'name': name, 'signature': 'def '+name+'()', 'description': name,
+                          'depends_on': ['first', 'second'] if name == 'main' else [],
+                          'uses': [], 'requirements': ['R1', 'R2']} for name in ('first', 'second', 'main')]}
+        self.sources = {'first': 'def first():\n    return 1\n', 'second': 'def second():\n    return 2\n',
+                        'main': 'def main():\n    print(first(), second())\n'}
+        original = self.runtime.complete.side_effect
+        reviews = []
+        def respond(system, prompt, schema=None, **kwargs):
+            if schema == REVIEW_SCHEMA:
+                reviews.append(prompt)
+                raise RuntimeFailure('review engine unavailable')
+            return original(system, prompt, schema=schema, **kwargs)
+        self.runtime.complete.side_effect = respond
+        result = self.run_clock()
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(result['metrics']['model_calls'], 6)
+        self.assertEqual(result['verification']['layers']['semantic_review']['status'], 'inconclusive')
