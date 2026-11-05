@@ -115,11 +115,11 @@ class Runtime:
         self.log.seek(max(0, size - 2500))
         return self.log.read().decode("utf-8", errors="replace").replace(self.key, "<local-auth>")
 
-    def generate(self, prompt, language):
+    def generate(self, prompt, language, timeout=None):
         system = (f"You are a precise coding assistant. Produce one complete, runnable {language} source file. "
                   "Return exactly one Markdown code block containing only the full source code. "
                   "No explanations, no placeholders, no multiple files. Do not execute anything.")
-        return self.complete(system, prompt)
+        return self.complete(system, prompt, timeout=timeout)
 
     def complete(self, system, prompt, schema=None, timeout=None):
         """Stateless chat: fresh messages and no KV/prompt reuse on every call."""

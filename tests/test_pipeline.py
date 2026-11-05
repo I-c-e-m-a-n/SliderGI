@@ -47,6 +47,10 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(self.runtime.complete.call_count, 1)
         self.assertEqual(self.runtime.generate.call_count, 1)
         self.assertEqual(list((self.root/'.gi-coder/tmp').iterdir()), [])
+        manifest = json.loads(result['path'].with_name('greeting.rs.gi-coder.json').read_text())
+        import hashlib
+        self.assertEqual(manifest['verification']['source_sha256'], hashlib.sha256(result['path'].read_bytes()).hexdigest())
+        self.assertTrue(next((self.root/'.gi-coder/projects').glob('*/source.rs')).is_file())
         self.assertEqual(self.runtime.complete.call_args.kwargs['schema'], SCHEMA)
 
     def test_text_routes_to_terminal_without_source_files(self):
@@ -131,7 +135,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(list((self.root/'.gi-coder/tmp').iterdir()), [])
 
     def test_private_assessment_and_revised_prompt_exist_only_during_request(self):
-        def generation(*args):
+        def generation(*args, **kwargs):
             files = list((self.root/'.gi-coder/tmp').glob('request-*/*'))
             self.assertEqual({p.name for p in files}, {'assessment.json', 'revised-prompt.json'})
             for path in files:

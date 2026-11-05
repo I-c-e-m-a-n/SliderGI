@@ -15,7 +15,7 @@ def signature(node):
 
 def parse_signature(text):
     try:
-        tree = ast.parse(text + ':\n    pass\n')
+        tree = ast.parse(text.strip().removesuffix(':').rstrip() + ':\n    pass\n')
         node = tree.body[0]
         if len(tree.body) != 1 or not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.decorator_list:
             raise ValueError('expected one undecorated function signature')
@@ -104,6 +104,13 @@ def references(nodes, classes):
 
 def verify_source(source, plan=None, completed=None, final=True):
     index, nodes, tree = inventory(source)
+    check_globals(source, {c['name'] for c in plan['components'] if '.' not in c['name']} if plan else ())
+    for name, node in nodes.items():
+        body = [n for n in node.body if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str))]
+        if not body or all(isinstance(n, ast.Pass) or isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and n.value.value is Ellipsis for n in body):
+            raise CoderError(f'Unimplemented component: {name}')
+        if any(isinstance(n, ast.Name) and n.id == 'NotImplementedError' for n in ast.walk(node)):
+            raise CoderError(f'Placeholder implementation: {name}')
     if plan is None:
         return {'source_sha256': hashlib.sha256(source.encode()).hexdigest(), 'inventory': index,
                 'coverage': 'not_reviewed', 'level': 'syntax_and_structure'}
@@ -198,3 +205,20 @@ def dependency_status(dependencies):
         except importlib.metadata.PackageNotFoundError:
             result.append({**dependency, 'installed_version': None})
     return result
+
+
+def check_globals(source, allowed=()):
+    """Lexical symbol analysis only; no importing or execution of model output."""
+    table = symtable.symtable(source, '<generated>', 'exec')
+    declared = {s.get_name() for s in table.get_symbols()
+                if s.is_assigned() or s.is_imported() or s.is_namespace()}
+    declared.update(allowed)
+    declared.update(dir(builtins))
+    declared.update(('__name__', '__file__', '__doc__', '__package__', '__annotations__', '__builtins__'))
+    def check(scope):
+        for symbol in scope.get_symbols():
+            if symbol.is_referenced() and symbol.is_global() and symbol.get_name() not in declared:
+                raise CoderError(f'Undefined global/import: {symbol.get_name()}')
+        for child in scope.get_children():
+            check(child)
+    check(table)

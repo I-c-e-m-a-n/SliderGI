@@ -96,19 +96,19 @@ class PlanCorrectionTest(unittest.TestCase):
         self.assertAlmostEqual(result['timings']['planning'], 159.79334933299106)
         self.assertEqual(result['timings']['retry'], 12.5)
         self.assertEqual(record['timings']['generation'], 10)
-        self.assertEqual(record['timings']['verification'], 1)
+        self.assertEqual(record['timings']['verification'], .25)
         self.assertEqual(record['calls'][0]['usage']['completion_tokens'], 787)
         for phase in record['timings']:
             self.assertAlmostEqual(record['timings'][phase], sum(row['seconds'] for row in record['calls'] if row['phase'] == phase))
 
     def test_two_retries_maximum_never_starts_implementation_on_invalid_plan(self):
         self.replies = [self.replies[0]]
-        with self.assertRaisesRegex(CoderError, 'after 3 attempts'):
+        with self.assertRaisesRegex(CoderError, 'Repeated plan failure after 2 attempts'):
             self.run_clock()
         record = self.manifest()
-        self.assertEqual(len(self.plan_calls), 3)
+        self.assertEqual(len(self.plan_calls), 2)
         self.assertEqual(self.component_calls, [])
-        self.assertEqual(len(list(self.workspace().glob('*.raw.json'))), 3)
+        self.assertEqual(len(list(self.workspace().glob('*.raw.json'))), 2)
         self.assertEqual(record['status'], 'failed')
         self.assertIsNone(record['plan'])
         self.assertTrue(all(r['status'] == 'rejected' for r in record['planning_attempts']))
@@ -124,7 +124,7 @@ class PlanCorrectionTest(unittest.TestCase):
         self.assertEqual(len(self.plan_calls), 3)
         self.assertEqual(self.plan_calls[2][1]['rejected_plan'], another)
         self.assertIn('(font)', self.plan_calls[2][1]['validation_error'])
-        self.assertEqual(len(self.manifest()['calls']), 3 + 5 + 4)
+        self.assertEqual(len(self.manifest()['calls']), 3 + 5 + 1)
         self.assertEqual(self.manifest()['timings']['retry'], 25)
         self.assertEqual(self.manifest()['planning_attempts'][0]['seconds'], 159.79334933299106)
 

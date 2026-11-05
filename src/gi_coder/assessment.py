@@ -52,9 +52,9 @@ def validate_schema(value, schema, location='assessment'):
     if 'enum' in schema and value not in schema['enum']:
         raise CoderError(f'{location}: invalid value')
     if isinstance(value, dict):
-        if set(value) != set(schema['required']):
+        if not set(schema['required']) <= set(value) or not set(value) <= set(schema['properties']):
             raise CoderError(f'{location}: missing fields {sorted(set(schema["required"]) - set(value))}; '
-                             f'unknown fields {sorted(set(value) - set(schema["required"]))}')
+                             f'unknown fields {sorted(set(value) - set(schema["properties"]))}')
         for key, item in value.items():
             validate_schema(item, schema['properties'][key], location + '.' + key)
     elif isinstance(value, list):

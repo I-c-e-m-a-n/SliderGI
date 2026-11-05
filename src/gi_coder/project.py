@@ -11,7 +11,7 @@ from pathlib import Path
 from .assessment import no_duplicates, string, validate_schema
 from .config import CoderError
 from .generation import extract_source, write_source
-from .verification import dependency_status, parse_signature, verify_source
+from .verification import dependency_status, parse_signature, signature, verify_source
 
 
 def obj(properties):
@@ -32,6 +32,9 @@ PLAN_SCHEMA = obj({
     'components': array(obj({'name': string(100), 'signature': string(400), 'description': string(1600),
                              'depends_on': array(string(100)), 'uses': array(string(100)), 'requirements': array(string(20))})),
     'entrypoint': string(80)})
+# Empty structural sections are optional; normalization supplies bounded empty lists.
+PLAN_SCHEMA['required'] = [key for key in PLAN_SCHEMA['required']
+                           if key not in ('imports', 'dependencies', 'variables', 'classes')]
 REVIEW_SCHEMA = obj({'verdict': {'type': 'string', 'enum': ['pass', 'fail']},
                      'evidence': string(2000), 'evidence_snippets': array(string(1000)), 'issues': array(string(500)),
                      'missing_requirements': array(string(500))})
@@ -42,21 +45,83 @@ def decode(raw, schema, location='project'):
         if len(raw) > 128000:
             raise CoderError('Project JSON exceeds resource limit')
         data = json.loads(raw, object_pairs_hook=no_duplicates)
-    except ValueError as exc:
+    except json.JSONDecodeError as exc:
         raise CoderError(f'{location}: invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}') from exc
+    if schema is PLAN_SCHEMA:
+        data = normalize_plan(data)
     validate_schema(data, schema, location)
     return data
 
 
+class RequirementReviewError(CoderError):
+    """A valid reviewer response reports a source requirement defect."""
+
+
+class ReviewEvidenceError(CoderError):
+    """A reviewer response failed its contract; this is not a source defect."""
+
+
 def verify_evidence(review, source):
-    """Require concrete executable AST snippets, not invented lines or comments."""
+    """Compare executable ASTs so whitespace/quote differences need no inference."""
     if not review['evidence_snippets']:
-        raise CoderError('Requirement review lacks source evidence')
-    nodes = (ast.Call, ast.Assign, ast.AugAssign, ast.Return, ast.If, ast.While, ast.For, ast.Compare)
-    segments = {ast.get_source_segment(source, node) for node in ast.walk(ast.parse(source)) if isinstance(node, nodes)}
+        raise ReviewEvidenceError('Requirement review lacks source evidence')
+    kinds = (ast.Call, ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Return,
+             ast.If, ast.While, ast.For, ast.Compare, ast.Raise)
+    segments = {ast.dump(node) for node in ast.walk(ast.parse(source)) if isinstance(node, kinds)}
     for snippet in review['evidence_snippets']:
-        if snippet not in segments:
-            raise CoderError('Requirement review cited nonexistent or non-executable source evidence')
+        try:
+            tree = ast.parse(textwrap.dedent(snippet).strip())
+            nodes = [n.value if isinstance(n, ast.Expr) else n for n in tree.body]
+        except SyntaxError:
+            nodes = []
+        if not nodes or any(ast.dump(n) not in segments for n in nodes):
+            raise ReviewEvidenceError('Requirement review cited nonexistent or non-executable source evidence')
+
+
+def review_source(call, context, source):
+    """At most one targeted evidence correction. Never rewrite valid code for it."""
+    previous = None
+    for attempt in range(2):
+        raw = call('Review the supplied Python source without executing it. Check actual behavior and '
+                   'all original requirements, not comments or syntax alone. Report missing behavior in issues '
+                   'or missing_requirements. Copy executable source statements or expressions into evidence_snippets. '
+                   'When review_error is supplied, correct only the review evidence, preserving honest findings.',
+                   context, REVIEW_SCHEMA)
+        try:
+            review = decode(raw, REVIEW_SCHEMA)
+            verify_evidence(review, source)
+            return review
+        except CoderError as exc:
+            if attempt or raw == previous:
+                raise ReviewEvidenceError('Review-evidence validation failed: ' + str(exc)) from exc
+            previous = raw
+            context = {**context, 'rejected_review': raw, 'review_error': str(exc)}
+    raise AssertionError('unreachable')
+
+
+def normalize_plan(plan):
+    """Only unambiguous spelling repairs; never evaluate expressions or drop fields."""
+    if not isinstance(plan, dict):
+        return plan
+    import copy
+    plan = copy.deepcopy(plan)
+    for key in ('imports', 'dependencies', 'variables', 'classes'):
+        plan.setdefault(key, [])
+    if isinstance(plan.get('imports'), list):
+        for i, line in enumerate(plan['imports']):
+            if isinstance(line, str):
+                line = line.strip()
+                if re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*', line):
+                    line = 'import ' + line
+                plan['imports'][i] = line
+    if isinstance(plan.get('components'), list):
+        for component in plan['components']:
+            if isinstance(component, dict) and isinstance(component.get('signature'), str):
+                try:
+                    component['signature'] = signature(parse_signature(component['signature']))
+                except CoderError:
+                    pass  # Preserve invalid values for field-specific validation diagnostics.
+    return plan
 
 
 def identifier(name, field='plan'):
@@ -66,7 +131,7 @@ def identifier(name, field='plan'):
 
 def validate_plan(plan, config):
     try:
-        return _validate_plan(plan, config)
+        return _validate_plan(normalize_plan(plan), config)
     except (SyntaxError, ValueError, TypeError, KeyError) as exc:
         raise CoderError(f'Invalid implementation plan: {exc}') from exc
 
@@ -225,7 +290,7 @@ def component_source(raw, component):
 
 
 def generate_project(runtime, prompt, assessment, root, max_config):
-    """One flat plan, at most two plan corrections; no generation repair recursion."""
+    """Flat planning, bounded component repair, and non-executing verification."""
     directory = root / '.gi-coder/projects'
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     workspace = Path(tempfile.mkdtemp(prefix='project-', dir=directory))
@@ -234,6 +299,7 @@ def generate_project(runtime, prompt, assessment, root, max_config):
                 'planning_attempts': [], 'timings': {'planning': 0.0, 'retry': 0.0,
                                                     'generation': 0.0, 'verification': 0.0}}
     def save():
+        manifest['metrics'] = call_metrics(manifest['calls'], manifest['status'] == 'verified')
         write_source(workspace/'manifest.json', json.dumps(manifest, ensure_ascii=True, indent=2) + '\n', True)
     save()
     deadline = time.monotonic() + max_config.get('project_timeout', 1800)
@@ -242,7 +308,7 @@ def generate_project(runtime, prompt, assessment, root, max_config):
         nonlocal calls
         calls += 1
         remaining = deadline - time.monotonic()
-        if remaining <= 0 or calls > 3 + max_config.get('max_components', 16) + max_config.get('max_requirements', 16):
+        if remaining <= 0 or calls > 5 + 3 * max_config.get('max_components', 16) + 2 * max_config.get('max_requirements', 16):
             raise CoderError('Project time/call budget exhausted')
         started = time.monotonic()
         row = {'number': calls, 'phase': phase, 'usage': {}, 'status': 'failed'}
@@ -277,6 +343,7 @@ def generate_project(runtime, prompt, assessment, root, max_config):
             'imports/shared data/classes. No decorators, nested functions or extra files. '
             f'Maximum {max_config.get("max_components", 16)} components and {max_config.get("max_requirements", 16)} requirements.')
         context = {'original_request': prompt, 'revised_prompt': assessment.get('revised_prompt', '')}
+        rejected_fingerprints, rejected_errors = set(), set()
         for attempt in range(1, 4):
             entry = {'attempt': attempt, 'call_number': calls + 1,
                      'raw_plan': f'plan-attempt-{attempt}.raw.json', 'status': 'pending'}
@@ -302,6 +369,11 @@ def generate_project(runtime, prompt, assessment, root, max_config):
             except CoderError as exc:
                 entry.update(status='rejected', validation_error=str(exc))
                 save()
+                fingerprint = plan_fingerprint(raw)
+                if fingerprint in rejected_fingerprints or str(exc) in rejected_errors:
+                    raise CoderError(f'Repeated plan failure after {attempt} attempts: {exc}') from exc
+                rejected_fingerprints.add(fingerprint)
+                rejected_errors.add(str(exc))
                 if attempt == 3:
                     raise CoderError(f'Plan validation failed after 3 attempts: {exc}') from exc
                 try:
@@ -331,31 +403,69 @@ def generate_project(runtime, prompt, assessment, root, max_config):
                        'classes': [c for c in plan['classes'] if c['name'] in used or component['name'].startswith(c['name'] + '.')],
                        'dependency_signatures': {c['name']: c['signature'] for c in plan['components'] if c['name'] in component['depends_on']},
                        'requirements': [r for r in plan['requirements'] if r['id'] in component['requirements']]}
-            raw = call('Implement only this exact Python function or method in one fenced Python block. '
-                       'Preserve its signature, use declared imports/shared state and dependency signatures. '
-                       'Do not add imports, classes, helper functions, decorators, placeholders or entrypoint calls.', context)
-            sources[component['name']] = component_source(raw, component)
-            source = assemble(plan, sources)
-            if len(source.encode()) > 128 * 1024:
-                raise CoderError('Single-file source exceeds 128 KiB safeguard')
-            manifest['verification'] = verify_source(source, plan, completed=sources, final=False)
+            seen = set()
+            for attempt in range(3):
+                raw = call('Implement only this exact Python function or method in one fenced Python block. '
+                           'Preserve its signature, use declared imports/shared state and dependency signatures. '
+                           'Do not add imports, classes, helper functions, decorators, placeholders or entrypoint calls. '
+                           'If validation_error is present, correct that defect without changing the contract.', context,
+                           phase='generation' if attempt == 0 else 'retry')
+                try:
+                    candidate = component_source(raw, component)
+                    trial = {**sources, component['name']: candidate}
+                    source = assemble(plan, trial)
+                    if len(source.encode()) > 128 * 1024:
+                        raise CoderError('Single-file source exceeds 128 KiB safeguard')
+                    checked = verify_source(source, plan, completed=trial, final=False)
+                except CoderError as exc:
+                    fingerprint = raw.strip()
+                    if fingerprint in seen or attempt == 2:
+                        raise CoderError(f'Component correction exhausted: {exc}') from exc
+                    seen.add(fingerprint)
+                    context = {**context, 'rejected_source': raw, 'validation_error': str(exc)}
+                    continue
+                sources = trial
+                manifest['verification'] = checked
+                break
             write_source(workspace/'source.py', source, True)
             manifest['progress'][component['name']] = 'implemented'
             save()
         source = assemble(plan, sources, final=True)
-        manifest['verification'] = verify_source(source, plan)
-        forbidden = re.findall(r"(?:do not|don't|never)\s+(?:use|import)\s+([A-Za-z_]\w*)|without\s+([A-Za-z_]\w*)", prompt, re.I)
-        imported = ' '.join(manifest['verification']['inventory']['imports']).lower()
-        for pair in forbidden:
-            module = next(filter(None, pair)).lower()
-            if re.search(r'\b' + re.escape(module) + r'\b', imported):
-                raise CoderError(f'Forbidden import from original request: {module}')
+        verify_constraints(source, prompt)
+        final_seen = set()
+        for attempt in range(3):
+            try:
+                manifest['verification'] = verify_source(source, plan)
+                break
+            except CoderError as exc:
+                if source in final_seen or attempt == 2:
+                    raise CoderError(f'Final integration correction exhausted: {exc}') from exc
+                final_seen.add(source)
+                # Integration defects usually concern wiring. Keep all component
+                # contracts fixed and repair the caller named in the diagnostic,
+                # falling back to the entrypoint for disconnected behavior.
+                candidates = [] if str(exc).startswith('Disconnected') else [
+                    c for c in plan['components'] if c['name'] in str(exc)]
+                component = next((c for c in candidates if c['name'] == plan['entrypoint']),
+                                 candidates[0] if candidates else next(c for c in plan['components'] if c['name'] == plan['entrypoint']))
+                raw = call('Correct only this Python component using validation_error. Return one function. '
+                           'Preserve the exact signature and declared imports, uses and dependency contracts. '
+                           'Wire required behavior into the existing program; no extra scope or execution.',
+                           {'component': component, 'rejected_source': sources[component['name']],
+                            'validation_error': str(exc), 'original_request': prompt,
+                            'dependency_signatures': {c['name']: c['signature'] for c in plan['components']
+                                                      if c['name'] in component['depends_on']}}, phase='retry')
+                sources[component['name']] = component_source(raw, component)
+                source = assemble(plan, sources, final=True)
+                if len(source.encode()) > 128 * 1024:
+                    raise CoderError('Single-file source exceeds 128 KiB safeguard')
         write_source(workspace/'source.py', source, True)
         manifest['status'] = 'reviewing'
         save()
         # Review each requirement using only its integrated reachable component
         # slice. All requirement texts remain visible so omissions can be flagged.
         graph = manifest['verification']['references']
+        reviewed_slices = {}
         for req in plan['requirements']:
             relevant, pending = set(), list(req['components'])
             while pending:
@@ -370,15 +480,19 @@ def generate_project(runtime, prompt, assessment, root, max_config):
                 parents = {name for name, refs in graph.items() if set(refs) & relevant}
                 changed = not parents <= relevant
                 relevant.update(parents)
-            review = decode(call('Review this integrated code slice without executing it. Check the target requirement, '
-                'actual behavior/data flow and event-loop integration, not comments or mere syntax. Compare the full original '
-                'request against the requirement list; report omissions in missing_requirements. Fail on missing/disconnected '
-                'behavior, forbidden libraries, placeholders or insufficient evidence. Cite exact executable AST statements '
-                'or expressions copied verbatim from the supplied source in evidence_snippets.',
+            slice_key = tuple(sorted(relevant))
+            if slice_key in reviewed_slices:
+                manifest['reviews'].append({'requirement': req['id'], 'reused': True, **reviewed_slices[slice_key]})
+                continue
+            review = review_source(
+                lambda system, context, schema: call(system, context, schema, phase='verification'),
                 {'original_request': prompt, 'all_requirements': plan['requirements'], 'target': req,
+                 'covered_requirements': [r for r in plan['requirements'] if set(r['components']) <= relevant],
+                 'review_scope': 'Check covered_requirements against this slice. Flag original requirements absent from all_requirements; other slices are reviewed separately',
                  'imports': plan['imports'], 'variables': plan['variables'], 'classes': plan['classes'],
                  'references': graph, 'source': {name: sources[name] for name in sorted(relevant)}},
-                REVIEW_SCHEMA, phase='verification'), REVIEW_SCHEMA)
+                '\n'.join(sources[name] for name in sorted(relevant)))
+            reviewed_slices[slice_key] = review
             manifest['reviews'].append({'requirement': req['id'], **review})
             save()
             if review['verdict'] != 'pass' or review['issues'] or review['missing_requirements']:
@@ -398,7 +512,7 @@ def generate_project(runtime, prompt, assessment, root, max_config):
         raise
 
 
-def single_manifest(runtime, prompt, assessment, source):
+def single_manifest(runtime, prompt, assessment, source, call=None):
     """Keep simple requests one-shot; one bounded review checks their semantics."""
     manifest = {'version': 1, 'original_request': prompt, 'assessment': assessment,
                 'status': 'verified', 'plan': {'architecture': 'single-pass source',
@@ -406,16 +520,13 @@ def single_manifest(runtime, prompt, assessment, source):
                 'progress': {'source': 'implemented'}, 'reviews': []}
     if assessment['language'] == 'python':
         manifest['verification'] = verify_source(source)
-        raw, _ = runtime.complete('Review the Python program without executing it. Compare actual implementation '
-            'against every original requirement/constraint. Fail missing or disconnected behavior, undefined names, '
-            'invalid imports/signatures and placeholders. Give concrete evidence; syntax alone is insufficient. '
-            'Copy exact executable source statements/expressions verbatim into evidence_snippets.',
-            json.dumps({'original_request': prompt, 'assessment': assessment, 'source': source}, separators=(',', ':')),
-            schema=REVIEW_SCHEMA)
-        review = decode(raw, REVIEW_SCHEMA)
+        if call is None:
+            call = lambda system, context, schema: runtime.complete(
+                system, json.dumps(context, separators=(',', ':')), schema=schema)[0]
+        review = review_source(call, {'original_request': prompt, 'assessment': assessment, 'source': source}, source)
         manifest['reviews'].append(review)
         if review['verdict'] != 'pass' or review['issues'] or review['missing_requirements']:
-            raise CoderError('Source requirement review failed: ' + review['evidence'])
+            raise RequirementReviewError('Source requirement review failed: ' + review['evidence'])
         verify_evidence(review, source)
         manifest['verification']['coverage'] = 'model_reviewed_not_runtime_proof'
         manifest['plan']['actual_structure'] = manifest['verification']['inventory']
@@ -440,3 +551,121 @@ def single_manifest(runtime, prompt, assessment, source):
         manifest['verification'] = {'source_sha256': hashlib.sha256(source.encode()).hexdigest(),
                                     'coverage': 'unverified', 'level': 'framing_only_non_python'}
     return manifest
+
+
+def plan_fingerprint(raw):
+    try:
+        return json.dumps(normalize_plan(json.loads(raw, object_pairs_hook=no_duplicates)), sort_keys=True)
+    except (ValueError, CoderError):
+        return raw.strip()
+
+
+def generate_single(runtime, prompt, assessment, revised, root, config):
+    """Two repairs at most; transport failures and invalid reviews never repair code."""
+    directory = root / '.gi-coder/projects'
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    workspace = Path(tempfile.mkdtemp(prefix='project-', dir=directory))
+    record = {'version': 1, 'workspace': str(workspace), 'original_request': prompt,
+              'assessment': assessment, 'status': 'generating', 'calls': [], 'attempts': []}
+    deadline = time.monotonic() + config.get('project_timeout', 1800)
+    seen = set()
+    def save():
+        write_source(workspace/'manifest.json', json.dumps(record, indent=2) + '\n', True)
+    def invoke(phase, operation):
+        if time.monotonic() >= deadline:
+            raise CoderError('Project time budget exhausted')
+        row = {'number': len(record['calls']) + 1, 'phase': phase, 'status': 'failed', 'usage': {}}
+        started = time.monotonic()
+        try:
+            raw, stats = operation()
+            row.update(status='completed', usage=stats)
+            if time.monotonic() > deadline:
+                raise CoderError('Project time budget exhausted')
+            return raw
+        finally:
+            row['seconds'] = time.monotonic() - started
+            record['calls'].append(row)
+            save()
+    def review_call(system, context, schema):
+        return invoke('verification', lambda: runtime.complete(system, json.dumps(context, separators=(',', ':')),
+                      schema=schema, timeout=max(0.001, deadline-time.monotonic())))
+    save()
+    try:
+        correction = None
+        for attempt in range(3):
+            if correction is None:
+                raw = invoke('generation', lambda: runtime.generate(
+                    revised, assessment['language'], timeout=max(0.001, deadline-time.monotonic())))
+            else:
+                raw = invoke('retry', lambda: runtime.complete(
+                    'Correct this source using the validation_error and original requirements. Return one complete '
+                    'fenced source file. No execution, tools, extra files or safety bypass.',
+                    json.dumps(correction, separators=(',', ':')), timeout=max(0.001, deadline-time.monotonic())))
+            write_source(workspace/f'source-attempt-{attempt+1}.raw.txt', raw, True)
+            row = {'attempt': attempt+1, 'status': 'rejected'}
+            record['attempts'].append(row)
+            repairable = True
+            try:
+                if len(raw.encode()) > 128 * 1024:
+                    raise CoderError('Single-file source exceeds 128 KiB safeguard')
+                source = extract_source(raw, assessment['language'])
+                if assessment['language'] == 'python':
+                    verify_constraints(source, prompt)
+                    verify_source(source)
+                repairable = False
+                manifest = single_manifest(runtime, prompt, assessment, source, call=review_call)
+            except ReviewEvidenceError:
+                raise  # Reviewer errors cannot justify changing generated code.
+            except CoderError as exc:
+                if not repairable and not isinstance(exc, RequirementReviewError):
+                    raise
+                row['validation_error'] = str(exc)
+                save()
+                # Non-Python framing keeps its original fail-closed behavior.
+                if assessment['language'] != 'python' or raw.strip() in seen or attempt == 2:
+                    raise CoderError(f'Source correction exhausted: {exc}') from exc
+                seen.add(raw.strip())
+                correction = {'original_request': prompt, 'rejected_source': raw, 'validation_error': str(exc)}
+                continue
+            row['status'] = 'accepted'
+            record.update(manifest)
+            record['metrics'] = call_metrics(record['calls'], success=True)
+            save()
+            stats = dict(record['calls'][0]['usage'])
+            stats.update(record['metrics'])
+            return source, record, workspace, stats
+    except BaseException as exc:
+        record.update(status='failed', error=str(exc) or type(exc).__name__)
+        record['metrics'] = call_metrics(record['calls'], success=False)
+        save()
+        raise
+
+
+def call_metrics(calls, success):
+    """Measured values only; absent token counts remain explicitly unknown."""
+    metrics = {'model_calls': len(calls), 'inference_seconds': sum(c['seconds'] for c in calls),
+               'successful_completion': success}
+    for key in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
+        values = [c['usage'].get(key) for c in calls]
+        metrics[key] = sum(values) if all(type(v) is int for v in values) else None
+    return metrics
+
+
+def verify_constraints(source, prompt):
+    """Deterministic checks for explicit import restrictions; no generated execution."""
+    import sys
+    roots = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            roots.update(a.name.split('.')[0].lower() for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            roots.add(node.module.split('.')[0].lower())
+    forbidden = re.findall(r"(?:do not|don't|never)\s+(?:use|import)\s+([A-Za-z_]\w*)|without\s+([A-Za-z_]\w*)", prompt, re.I)
+    for pair in forbidden:
+        module = next(filter(None, pair)).lower()
+        if module in roots:
+            raise CoderError(f'Forbidden import from original request: {module}')
+    if re.search(r'(?:without|no)\s+(?:any\s+)?(?:external|third.party)\s+(?:libraries|dependencies|packages)', prompt, re.I):
+        external = roots - sys.stdlib_module_names - {'__future__'}
+        if external:
+            raise CoderError(f'External imports forbidden by original request: {sorted(external)}')

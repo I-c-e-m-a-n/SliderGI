@@ -191,3 +191,42 @@ class IncrementalProjectTest(unittest.TestCase):
         result = verify_source(assemble(data, sources, final=True), data)
         self.assertEqual(result['inventory']['classes']['Counter']['fields'], ['value'])
         self.assertIn('Counter.increment', result['references']['main'])
+
+    def test_component_validation_failure_is_repaired_once_then_checked(self):
+        original = self.runtime.complete.side_effect
+        attempts = []
+        def respond(system, prompt, schema=None, **kwargs):
+            context = json.loads(prompt)
+            if schema is None and context['component']['name'] == 'hand_angles':
+                attempts.append(context)
+                if len(attempts) == 1:
+                    return 'def hand_angles(now):\n    return missing_math.pi\n', {}
+            return original(system, prompt, schema=schema, **kwargs)
+        self.runtime.complete.side_effect = respond
+        result = self.run_clock()
+        self.assertEqual(len(attempts), 2)
+        self.assertIn('Undefined global/import', attempts[1]['validation_error'])
+        self.assertEqual(result['metrics']['model_calls'], 9)  # assessment, plan, 6 components, one review
+        self.assertTrue(result['metrics']['successful_completion'])
+
+    def test_clock_review_slices_are_deduplicated(self):
+        result = self.run_clock()
+        self.assertEqual(sum(schema == REVIEW_SCHEMA for schema, _ in self.calls), 1)
+        self.assertEqual(result['metrics']['model_calls'], 8)
+
+    def test_final_disconnected_entrypoint_is_repaired_with_contracts_preserved(self):
+        original = self.runtime.complete.side_effect
+        attempts = []
+        def respond(system, prompt, schema=None, **kwargs):
+            context = json.loads(prompt)
+            if schema is None and context['component']['name'] == 'main':
+                attempts.append(context)
+                if len(attempts) == 1:
+                    broken = SOURCES['main'].replace('draw_analog(surface, now, colour)', 'surface.fill(colour)')
+                    return broken, {}
+            return original(system, prompt, schema=schema, **kwargs)
+        self.runtime.complete.side_effect = respond
+        result = self.run_clock()
+        self.assertEqual(len(attempts), 2)
+        self.assertIn('Disconnected', attempts[1]['validation_error'])
+        self.assertTrue(result['metrics']['successful_completion'])

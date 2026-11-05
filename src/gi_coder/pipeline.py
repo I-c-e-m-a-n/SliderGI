@@ -1,4 +1,4 @@
-"""One request, two stateless calls on one resident runtime; no execution/tools."""
+"""Stateless adaptive requests on one resident runtime; no generated execution."""
 import json
 import os
 from pathlib import Path
@@ -9,7 +9,7 @@ from .assessment import assess
 from .config import ROOT, CoderError
 from .generation import extract_source, output_path, write_source
 from .languages import SPECS
-from .project import generate_project, single_manifest
+from .project import generate_project, generate_single, call_metrics
 from .verification import verify_source
 
 
@@ -73,6 +73,7 @@ def _process_request(runtime, prompt, language, filename, output_dir, overwrite,
     with tempfile.TemporaryDirectory(prefix='request-', dir=temporary) as work:
         print('Assessing request...', flush=True)
         started = time.monotonic()
+        request_started = started
         assessment, assessment_stats = assess(runtime, prompt, language, filename, root=root)
         assessment_stats = {**assessment_stats, 'seconds': time.monotonic() - started}
         revised = json.dumps({'original_request': prompt, 'assessment': assessment},
@@ -109,14 +110,12 @@ def _process_request(runtime, prompt, language, filename, output_dir, overwrite,
         started = time.monotonic()
         workspace = None
         config = runtime.config if isinstance(runtime.config, dict) else {}
-        incremental = assessment['language'] == 'python' and (
-            assessment['complexity'] != 'simple' or len(assessment['functions']) > 1)
+        incremental = assessment['language'] == 'python' and needs_decomposition(assessment, prompt)
         if incremental:
             source, manifest, workspace = generate_project(runtime, prompt, assessment, root, config)
             stats = {}
         else:
-            code, stats = runtime.generate(revised, assessment['language'])
-            source = extract_source(code, assessment['language'])
+            source, manifest, workspace, stats = generate_single(runtime, prompt, assessment, revised, root, config)
         if assessment['language'] == 'json':
             try:
                 json.loads(source)
@@ -126,9 +125,17 @@ def _process_request(runtime, prompt, language, filename, output_dir, overwrite,
         if incremental:
             manifest['verification'] = {**verify_source(source, manifest['plan']),
                 'coverage': 'model_reviewed_static_evidence_not_runtime_proof'}
-        else:
-            manifest = single_manifest(runtime, prompt, assessment, source)
+        elif assessment['language'] == 'python':
+            # Comments do not change static findings, but the delivered hash must match.
+            manifest['verification'] = {**verify_source(source),
+                'coverage': manifest['verification']['coverage']}
+        import hashlib
+        manifest['verification']['source_sha256'] = hashlib.sha256(source.encode()).hexdigest()
         stats = {**stats, 'seconds': time.monotonic() - started}
+        manifest['metrics'] = call_metrics([{'seconds': assessment_stats['seconds'], 'usage': assessment_stats},
+            *manifest.get('calls', [])], success=True)
+        manifest['assessment_statistics'] = assessment_stats
+        manifest['metrics']['request_seconds_before_delivery'] = time.monotonic() - request_started
         manifest['functions'] = assessment['functions']  # Retain V1 metadata compatibility.
         manifest['output_path'] = str(path)
         # Stage sidecar first so a metadata collision cannot leave an unaccompanied
@@ -163,13 +170,21 @@ def _process_request(runtime, prompt, language, filename, output_dir, overwrite,
         if sidecar:
             print(f'Project manifest: {sidecar}')
         if workspace:
-            write_source(workspace/'source.py', source, True)
+            write_source(workspace/('source' + assessment['extension']), source, True)
             write_source(workspace/'manifest.json', json.dumps(manifest, ensure_ascii=True, indent=2), True)
-            missing = [d['package'] for d in manifest['dependencies'] if d['installed_version'] is None]
+            missing = [d['package'] for d in manifest.get('dependencies', []) if d['installed_version'] is None]
             if missing:
                 print('Dependencies not installed (not installed automatically): ' + ', '.join(missing))
-        result = {'type': 'code', 'path': path, 'assessment': assessment,
+        result = {'type': 'code', 'path': path, 'assessment': assessment, 'metrics': manifest['metrics'],
                   'statistics': {'assessment': assessment_stats, 'generation': stats}}
         if incremental:
             result['project_timings'] = dict(manifest['timings'])
         return result
+
+
+def needs_decomposition(assessment, prompt):
+    """Function count alone does not make a small calculator a complex project."""
+    import re
+    return (assessment['complexity'] == 'complex' or len(assessment['functions']) >= 5
+            or assessment['complexity'] == 'moderate' and bool(re.search(
+                r'\b(?:pygame|GUI|event.loop)\b', prompt, re.I)))
