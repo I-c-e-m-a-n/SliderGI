@@ -36,3 +36,12 @@ class ContextCapacityTest(unittest.TestCase):
             runtime.complete('assess', 'large request', schema={})
         self.assertEqual(payloads, [])
         runtime.process.terminate.assert_not_called()
+
+    def test_truncated_completion_retains_raw_plan_for_diagnostics(self):
+        runtime = Runtime(load_config(), Path('unused'))
+        response = {'choices': [{'finish_reason': 'length', 'message': {'content': '{"architecture":"partial'}}],
+                    'usage': {'completion_tokens': 787}}
+        with patch.object(runtime, 'request', return_value=response), self.assertRaises(CoderError) as caught:
+            runtime.complete('plan', 'clock', schema={})
+        self.assertEqual(caught.exception.raw_response, '{"architecture":"partial')
+        self.assertEqual(caught.exception.response_usage['completion_tokens'], 787)

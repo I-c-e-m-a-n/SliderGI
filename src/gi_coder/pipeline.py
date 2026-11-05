@@ -49,8 +49,17 @@ def process_request(runtime, prompt, language=None, filename=None, output_dir=No
                'generation': result['statistics']['generation']['seconds'],
                'total': time.monotonic() - started}
     result['timings'] = timings
-    print(f'\nAssessment: {timings["assessment"]:.2f}s\nGeneration: {timings["generation"]:.2f}s\n'
-          f'Total: {timings["total"]:.2f}s')
+    if 'project_timings' in result:
+        timings['implementation'] = timings['generation']
+        timings.update(result['project_timings'])
+    lines = [f'Assessment: {timings["assessment"]:.2f}s']
+    if 'project_timings' in result:
+        lines.extend([f'Planning: {timings["planning"]:.2f}s', f'Plan retries: {timings["retry"]:.2f}s'])
+    lines.append(f'Generation: {timings["generation"]:.2f}s')
+    if 'project_timings' in result:
+        lines.append(f'Verification: {timings["verification"]:.2f}s')
+    lines.append(f'Total: {timings["total"]:.2f}s')
+    print('\n' + '\n'.join(lines))
     return result
 
 
@@ -159,5 +168,8 @@ def _process_request(runtime, prompt, language, filename, output_dir, overwrite,
             missing = [d['package'] for d in manifest['dependencies'] if d['installed_version'] is None]
             if missing:
                 print('Dependencies not installed (not installed automatically): ' + ', '.join(missing))
-        return {'type': 'code', 'path': path, 'assessment': assessment,
-                'statistics': {'assessment': assessment_stats, 'generation': stats}}
+        result = {'type': 'code', 'path': path, 'assessment': assessment,
+                  'statistics': {'assessment': assessment_stats, 'generation': stats}}
+        if incremental:
+            result['project_timings'] = dict(manifest['timings'])
+        return result

@@ -153,11 +153,17 @@ class Runtime:
             result = self.request("/v1/chat/completions", payload, timeout=timeout)
             choice = result["choices"][0]
             if choice.get("finish_reason") != "stop":
-                raise CoderError("Generation did not finish (possibly output-token limit). "
-                                 "No file written. Increase max_tokens/context_size or simplify the request.")
+                error = CoderError("Generation did not finish (possibly output-token limit). "
+                                   "No file written. Increase max_tokens/context_size or simplify the request.")
+                error.raw_response = choice.get('message', {}).get('content')
+                error.response_usage = result.get('usage', {})
+                raise error
             content = choice["message"]["content"]
             if not isinstance(content, str) or not content.strip():
-                raise CoderError("Qwen returned empty source code; no file written")
+                error = CoderError("Qwen returned empty source code; no file written")
+                error.raw_response = content
+                error.response_usage = result.get('usage', {})
+                raise error
             return content, {**result.get("usage", {}), "seconds": time.monotonic() - started}
         except urllib.error.HTTPError as exc:
             detail = exc.read(4000).decode("utf-8", errors="replace")

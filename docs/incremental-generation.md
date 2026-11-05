@@ -38,7 +38,8 @@ All requests still receive assessment and rewriting on the same resident model.
 Text keeps the existing assessment/answer path. Python assessed as moderate or
 complex, or summarized with multiple functions, follows:
 
-1. One schema-constrained implementation plan. No recursive task planning.
+1. One schema-constrained implementation plan, with at most two corrections
+   for JSON/schema/plan-validation failures. No recursive task planning.
 2. Validate requirements, imports/dependencies, literal shared initializers,
    class fields, function/method signatures and dependency graph.
 3. Generate each function/method once in topological dependency order. Each
@@ -63,6 +64,9 @@ Each incremental project has a private, retained workspace:
 ```text
 SliderGI/.gi-coder/projects/project-<id>/
     manifest.json
+    plan-attempt-1.raw.json
+    plan-attempt-2.raw.json   # Only if a correction is needed.
+    plan-attempt-3.raw.json   # Last allowed correction.
     source.py
 ```
 
@@ -71,7 +75,32 @@ requirements, architecture, exact signatures, classes/fields, shared variables,
 imports/package dependencies, direct references, component states, source hash,
 per-call timing/usage and review evidence. Its source inventory is recomputed
 from the AST after every integration step. Failed projects retain their last
-accepted checkpoint and error; they do not resume or retry automatically.
+accepted checkpoint and error; component generation/review never resumes or
+retries automatically. Raw plan text is saved verbatim before JSON decoding,
+normalization or validation. Rejected/malformed plans remain private in the
+workspace, with filenames, precise errors, elapsed times and token usage in
+`planning_attempts`. The validated `plan` remains null until an attempt passes.
+Raw-plan filenames are relative to the manifest's `workspace` path.
+Incomplete responses are retained when the runtime provides text; failures
+without a model response have no raw plan to save.
+
+Plan errors identify paths and expressions, for example
+`plan.variables[3].value (clock) = 'pygame.time.Clock()'`. Shared initializers
+remain Python literals only. Calls, names and arithmetic are not evaluated or
+allowed at module scope. Corrections receive the latest rejected plan, exact
+feedback and original request, and must move live resources into functions/
+`__init__`, passing state explicitly and updating signatures/uses/dependencies.
+They cannot bypass validation. After three invalid attempts the project fails
+without publishing source. Time/context budget failures, truncation, runtime
+failures and cancellation do not trigger plan-validation retries. All attempts
+share the existing project deadline and finite call budget.
+
+Initial planning prompts include the original and revised request rather than
+duplicating the verbose assessment/function summaries. Plans are asked to use
+compact JSON, brief descriptions and only necessary components. There is no
+new small output-token ceiling or loss of the original requirements. Actual
+latency depends on the local model; smaller prompt structure is not a measured
+Mac speedup.
 
 Only accepted final code is delivered to the normal `SliderGI_Output` directory
 (or explicit output override). Every generated source has an associated
@@ -102,10 +131,17 @@ initialize live resources in `main`/`__init__`.
 
 The flat plan is limited by `max_components` and `max_requirements` (1–32), one
 generation per component, one review per requirement, project time budget and
-128 KiB assembled-source bound. There are no autonomous execution tools, repair
-loops, background agents or multi-file program generation. Assessment timings
-remain separate; the displayed Generation duration now includes planning,
-integration and review. Per-call measurements also appear in project manifests.
+128 KiB assembled-source bound. There are no autonomous execution tools,
+generation repair loops, background agents or multi-file program generation.
+For incremental projects, the CLI and manifest separate initial Planning,
+Plan retries, Generation (component calls), and Verification call durations.
+Each call is measured by a monotonic clock, including transport and raw capture;
+token counts are retained. Local validation/checkpoint/file work contributes to
+overall implementation/Total duration rather than being presented as inference.
+The existing aggregate `statistics.generation.seconds` and
+`timings.implementation` retain the whole implementation duration. Text and
+single-pass timing output is unchanged. On failure the CLI prints the retained
+workspace and phase totals, which remain available in its manifest.
 
 ## Clock regression and genuine validation
 

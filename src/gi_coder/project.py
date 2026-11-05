@@ -37,14 +37,14 @@ REVIEW_SCHEMA = obj({'verdict': {'type': 'string', 'enum': ['pass', 'fail']},
                      'missing_requirements': array(string(500))})
 
 
-def decode(raw, schema):
+def decode(raw, schema, location='project'):
     try:
         if len(raw) > 128000:
             raise CoderError('Project JSON exceeds resource limit')
         data = json.loads(raw, object_pairs_hook=no_duplicates)
     except ValueError as exc:
-        raise CoderError('Invalid project JSON') from exc
-    validate_schema(data, schema)
+        raise CoderError(f'{location}: invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}') from exc
+    validate_schema(data, schema, location)
     return data
 
 
@@ -59,9 +59,9 @@ def verify_evidence(review, source):
             raise CoderError('Requirement review cited nonexistent or non-executable source evidence')
 
 
-def identifier(name):
+def identifier(name, field='plan'):
     if not name.isidentifier() or keyword.iskeyword(name):
-        raise CoderError(f'Invalid Python identifier in plan: {name}')
+        raise CoderError(f'{field}: invalid Python identifier {name!r}')
 
 
 def validate_plan(plan, config):
@@ -73,52 +73,60 @@ def validate_plan(plan, config):
 
 def _validate_plan(plan, config):
     if not 1 <= len(plan['components']) <= config.get('max_components', 16):
-        raise CoderError('Plan exceeds max_components or has no components')
+        raise CoderError(f'plan.components: expected 1..{config.get("max_components", 16)} items (max_components), got {len(plan["components"])}')
     if not 1 <= len(plan['requirements']) <= config.get('max_requirements', 16):
-        raise CoderError('Plan exceeds max_requirements or has no requirements')
+        raise CoderError(f'plan.requirements: expected 1..{config.get("max_requirements", 16)} items (max_requirements), got {len(plan["requirements"])}')
     names = [item['name'] for item in plan['components']]
     if len(set(names)) != len(names):
-        raise CoderError('Duplicate planned components')
+        raise CoderError(f'plan.components[].name: duplicate names in {names!r}')
     reqs = [item['id'] for item in plan['requirements']]
     if len(set(reqs)) != len(reqs):
-        raise CoderError('Duplicate requirements')
+        raise CoderError(f'plan.requirements[].id: duplicate IDs in {reqs!r}')
     classes = {cls['name']: cls for cls in plan['classes']}
     if len(classes) != len(plan['classes']):
-        raise CoderError('Duplicate classes')
+        raise CoderError(f'plan.classes[].name: duplicate class names in {[c["name"] for c in plan["classes"]]!r}')
     declared = set(classes)
-    for cls in plan['classes']:
-        identifier(cls['name'])
-        for field in cls['fields']:
-            identifier(field)
-        for base in cls['bases']:
-            node = ast.parse(base, mode='eval').body
+    for ci, cls in enumerate(plan['classes']):
+        identifier(cls['name'], f'plan.classes[{ci}].name')
+        for fi, field in enumerate(cls['fields']):
+            identifier(field, f'plan.classes[{ci}].fields[{fi}]')
+        for bi, base in enumerate(cls['bases']):
+            try:
+                node = ast.parse(base, mode='eval').body
+            except SyntaxError as exc:
+                raise CoderError(f'plan.classes[{ci}].bases[{bi}] = {base!r}: invalid expression') from exc
             if not isinstance(node, (ast.Name, ast.Attribute)) or any(not isinstance(n, (ast.Name, ast.Attribute, ast.Load)) for n in ast.walk(node)):
-                raise CoderError('Class bases must be names or attributes')
+                raise CoderError(f'plan.classes[{ci}].bases[{bi}] = {base!r}: class bases must be names or attributes')
             if isinstance(node, ast.Name) and node.id in classes and node.id not in list(classes)[:list(classes).index(cls['name'])]:
-                raise CoderError('Classes must be ordered before their derived classes')
-    for item in plan['variables']:
-        identifier(item['name'])
+                raise CoderError(f'plan.classes[{ci}].bases[{bi}] = {base!r}: base class must precede derived class')
+    for vi, item in enumerate(plan['variables']):
+        identifier(item['name'], f'plan.variables[{vi}].name')
         if item['name'] in declared:
-            raise CoderError('Duplicate module symbol')
+            raise CoderError(f'plan.variables[{vi}].name = {item["name"]!r}: duplicate module symbol')
         declared.add(item['name'])
         try:
             ast.literal_eval(item['value'])
         except (SyntaxError, ValueError) as exc:
-            raise CoderError('Shared initializers must be literals; initialize runtime resources in main/__init__') from exc
-    for line in plan['imports']:
-        tree = ast.parse(line)
+            raise CoderError(f'plan.variables[{vi}].value ({item["name"]}) = {item["value"]!r}: '
+                'Shared initializers must be literals; precompute constant values or initialize runtime '
+                'resources/calculations inside main/__init__ and pass them as parameters or self fields') from exc
+    for ii, line in enumerate(plan['imports']):
+        try:
+            tree = ast.parse(line)
+        except SyntaxError as exc:
+            raise CoderError(f'plan.imports[{ii}] = {line!r}: invalid import syntax') from exc
         if len(tree.body) != 1 or not isinstance(tree.body[0], (ast.Import, ast.ImportFrom)):
-            raise CoderError('Plan imports must contain only import statements')
+            raise CoderError(f'plan.imports[{ii}] = {line!r}: must contain only one import statement')
         node = tree.body[0]
         if isinstance(node, ast.ImportFrom) and (node.level or any(a.name == '*' for a in node.names)):
-            raise CoderError('Relative and wildcard imports are unsupported in single-file plans')
+            raise CoderError(f'plan.imports[{ii}] = {line!r}: relative/wildcard imports are unsupported')
         for alias in node.names:
             name = alias.asname or (alias.name.split('.')[0] if isinstance(node, ast.Import) else alias.name)
             if name in declared:
-                raise CoderError(f'Import collides with another symbol: {name}')
+                raise CoderError(f'plan.imports[{ii}] = {line!r}: import collides with symbol {name!r}')
             declared.add(name)
         # Normalize spelling for comparison against actual source.
-        plan['imports'][plan['imports'].index(line)] = ast.unparse(node)
+        plan['imports'][ii] = ast.unparse(node)
     roots = set()
     for line in plan['imports']:
         node = ast.parse(line).body[0]
@@ -129,50 +137,54 @@ def _validate_plan(plan, config):
     import sys
     external = roots - sys.stdlib_module_names - {'__future__'}
     if external != {d['module'] for d in plan['dependencies']}:
-        raise CoderError('External imports and dependency manifest disagree')
-    for dependency in plan['dependencies']:
-        identifier(dependency['module'])
+        raise CoderError(f'plan.dependencies[].module: expected {sorted(external)!r} from imports, '
+                         f'got {[d["module"] for d in plan["dependencies"]]!r}')
+    for di, dependency in enumerate(plan['dependencies']):
+        identifier(dependency['module'], f'plan.dependencies[{di}].module')
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}', dependency['package']):
-            raise CoderError('Unsafe dependency package name')
+            raise CoderError(f'plan.dependencies[{di}].package = {dependency["package"]!r}: unsafe package name')
     global_symbols = set(declared)
-    for component in plan['components']:
+    for ci, component in enumerate(plan['components']):
         if not set(component['uses']) <= global_symbols:
-            raise CoderError('Component uses undeclared shared symbols/imports')
+            raise CoderError(f'plan.components[{ci}].uses = {component["uses"]!r}: undeclared shared symbols/imports')
         parts = component['name'].split('.')
         if len(parts) > 2:
-            raise CoderError('Nested classes/functions are not supported')
+            raise CoderError(f'plan.components[{ci}].name = {component["name"]!r}: nested classes/functions unsupported')
         for part in parts:
-            identifier(part)
-        node = parse_signature(component['signature'])
+            identifier(part, f'plan.components[{ci}].name')
+        try:
+            node = parse_signature(component['signature'])
+        except CoderError as exc:
+            raise CoderError(f'plan.components[{ci}].signature = {component["signature"]!r}: {exc}') from exc
         if node.name != parts[-1]:
-            raise CoderError('Component name and signature disagree')
+            raise CoderError(f'plan.components[{ci}].signature = {component["signature"]!r}: disagrees with name {component["name"]!r}')
         if len(parts) == 2:
             if parts[0] not in classes or not node.args.args or node.args.args[0].arg != 'self':
-                raise CoderError('Methods need a declared class and self parameter')
+                raise CoderError(f'plan.components[{ci}].signature = {component["signature"]!r}: method needs declared class/self')
             constructor = parts[0] + '.__init__'
             if component['name'] != constructor and constructor in names and constructor not in component['depends_on']:
                 component['depends_on'].append(constructor)
         elif component['name'] in declared:
-            raise CoderError('Duplicate module symbol')
+            raise CoderError(f'plan.components[{ci}].name = {component["name"]!r}: duplicate module symbol')
         else:
             declared.add(component['name'])
         if not set(component['requirements']) <= set(reqs) or not component['requirements']:
-            raise CoderError('Component has invalid/missing requirement links')
+            raise CoderError(f'plan.components[{ci}].requirements = {component["requirements"]!r}: invalid/missing links')
         if not set(component['depends_on']) <= set(names) or component['name'] in component['depends_on']:
-            raise CoderError('Invalid component dependency')
-    for req in plan['requirements']:
+            raise CoderError(f'plan.components[{ci}].depends_on = {component["depends_on"]!r}: invalid component dependency')
+    for ri, req in enumerate(plan['requirements']):
         if not req['components'] or not set(req['components']) <= set(names):
-            raise CoderError('Requirement lacks planned implementation')
+            raise CoderError(f'plan.requirements[{ri}].components = {req["components"]!r}: no valid implementation links')
     if plan['entrypoint'] not in names or '.' in plan['entrypoint']:
-        raise CoderError('Application needs a top-level entrypoint')
+        raise CoderError(f'plan.entrypoint = {plan["entrypoint"]!r}: must name a top-level component')
     entry = parse_signature(next(c['signature'] for c in plan['components'] if c['name'] == plan['entrypoint']))
     if entry.args.args or entry.args.posonlyargs or entry.args.kwonlyargs or isinstance(entry, ast.AsyncFunctionDef):
-        raise CoderError('Entrypoint must be a synchronous zero-argument function')
+        raise CoderError(f'plan.entrypoint = {plan["entrypoint"]!r}: signature {ast.unparse(entry)!r} must be synchronous/zero-argument')
     ordered, remaining = [], list(plan['components'])
     while remaining:
         ready = [c for c in remaining if set(c['depends_on']) <= {x['name'] for x in ordered}]
         if not ready:
-            raise CoderError('Cyclic component dependencies')
+            raise CoderError(f'plan.components[].depends_on: cyclic dependencies among {[c["name"] for c in remaining]!r}')
         for component in ready:
             remaining.remove(component)
             ordered.append(component)
@@ -213,40 +225,94 @@ def component_source(raw, component):
 
 
 def generate_project(runtime, prompt, assessment, root, max_config):
-    """One flat plan, at most N components and R reviews; no repair recursion."""
+    """One flat plan, at most two plan corrections; no generation repair recursion."""
     directory = root / '.gi-coder/projects'
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     workspace = Path(tempfile.mkdtemp(prefix='project-', dir=directory))
-    manifest = {'version': 1, 'original_request': prompt, 'assessment': assessment, 'status': 'planning',
-                'plan': None, 'progress': {}, 'verification': None, 'reviews': [], 'calls': []}
+    manifest = {'version': 1, 'workspace': str(workspace), 'original_request': prompt, 'assessment': assessment, 'status': 'planning',
+                'plan': None, 'progress': {}, 'verification': None, 'reviews': [], 'calls': [],
+                'planning_attempts': [], 'timings': {'planning': 0.0, 'retry': 0.0,
+                                                    'generation': 0.0, 'verification': 0.0}}
     def save():
         write_source(workspace/'manifest.json', json.dumps(manifest, ensure_ascii=True, indent=2) + '\n', True)
     save()
     deadline = time.monotonic() + max_config.get('project_timeout', 1800)
     calls = 0
-    def call(system, context, schema=None):
+    def call(system, context, schema=None, phase='generation', raw_plan_path=None):
         nonlocal calls
         calls += 1
         remaining = deadline - time.monotonic()
-        if remaining <= 0 or calls > 2 + max_config.get('max_components', 16) + max_config.get('max_requirements', 16):
+        if remaining <= 0 or calls > 3 + max_config.get('max_components', 16) + max_config.get('max_requirements', 16):
             raise CoderError('Project time/call budget exhausted')
         started = time.monotonic()
-        raw, stats = runtime.complete(system, json.dumps(context, separators=(',', ':')), schema=schema, timeout=remaining)
-        manifest['calls'].append({'number': calls, 'seconds': time.monotonic() - started, 'usage': stats})
-        save()
+        row = {'number': calls, 'phase': phase, 'usage': {}, 'status': 'failed'}
+        try:
+            raw, stats = runtime.complete(system, json.dumps(context, separators=(',', ':')), schema=schema, timeout=remaining)
+            # Save verbatim before decoding, normalizing, validation or timeout checks.
+            if raw_plan_path:
+                write_source(workspace/raw_plan_path, raw, True)
+            row.update(usage=stats, status='completed')
+        except BaseException as exc:
+            partial = getattr(exc, 'raw_response', None)
+            if raw_plan_path and isinstance(partial, str):
+                write_source(workspace/raw_plan_path, partial, True)
+                row['usage'] = getattr(exc, 'response_usage', {})
+            row['error'] = str(exc) or type(exc).__name__
+            raise
+        finally:
+            row['seconds'] = time.monotonic() - started
+            manifest['calls'].append(row)
+            manifest['timings'][phase] += row['seconds']
+            save()
         if time.monotonic() > deadline:
             raise CoderError('Project time budget exhausted')
         return raw
     try:
-        raw = call('Plan ONE Python application, no code yet. Return schema JSON. Cover every original requirement, '
-                   'including controls and forbidden libraries. Declare imports, dependency packages, literal shared values, '
-                   'classes with self fields, exact def signatures (no colon), direct component dependencies and requirement IDs. '
-                   'For each component list uses (only needed imported names/shared variables/classes) and direct depends_on. '
-                   'Use a zero-argument main entrypoint. Qualified Class.method components are generated individually. '
-                   'No decorators, nested functions, recursive task planning, execution or extra files. Keep the flat plan within '
-                   f'{max_config.get("max_components", 16)} components and {max_config.get("max_requirements", 16)} requirements.',
-                   {'original_request': prompt, 'assessment': assessment}, PLAN_SCHEMA)
-        plan = validate_plan(decode(raw, PLAN_SCHEMA), max_config)
+        system = ('Plan one Python file as compact schema JSON, no code. Original requirements take priority. '
+            'Use the fewest necessary components; brief descriptions and requirement IDs, not repeated prose. '
+            'variables.value strings contain Python literals only: 640, False, None, quoted strings, literal containers. '
+            'No calls, names or arithmetic there: put pygame.display.set_mode(...), pygame.time.Clock(), fonts '
+            'and calculations inside main/__init__; pass live state as parameters or self fields. '
+            'Use exact def signatures without colons, a zero-argument main, direct depends_on, and uses for needed '
+            'imports/shared data/classes. No decorators, nested functions or extra files. '
+            f'Maximum {max_config.get("max_components", 16)} components and {max_config.get("max_requirements", 16)} requirements.')
+        context = {'original_request': prompt, 'revised_prompt': assessment.get('revised_prompt', '')}
+        for attempt in range(1, 4):
+            entry = {'attempt': attempt, 'call_number': calls + 1,
+                     'raw_plan': f'plan-attempt-{attempt}.raw.json', 'status': 'pending'}
+            manifest['planning_attempts'].append(entry)
+            save()
+            print('Planning...' if attempt == 1 else f'Correcting plan ({attempt - 1}/2)...', flush=True)
+            try:
+                raw = call(system if attempt == 1 else (
+                    'Correct the rejected plan using validation_error. Return the complete corrected compact schema JSON. '
+                    'Keep original requirements. Keep literal constants; remove runtime resources from variables (not None placeholders), '
+                    'initialize resources/calculations inside main/__init__, '
+                    'pass them explicitly, and update signatures, uses and dependencies. No safety bypass or extra scope.'),
+                    context, PLAN_SCHEMA, phase='planning' if attempt == 1 else 'retry', raw_plan_path=entry['raw_plan'])
+            except BaseException as exc:
+                entry.update(status='inference_failed', error=str(exc) or type(exc).__name__)
+                raise  # Transport, token/time budget and cancellation errors are not validation retries.
+            finally:
+                if manifest['calls'] and manifest['calls'][-1]['number'] == entry['call_number']:
+                    entry.update(seconds=manifest['calls'][-1]['seconds'], usage=manifest['calls'][-1]['usage'])
+                save()
+            try:
+                plan = validate_plan(decode(raw, PLAN_SCHEMA, 'plan'), max_config)
+            except CoderError as exc:
+                entry.update(status='rejected', validation_error=str(exc))
+                save()
+                if attempt == 3:
+                    raise CoderError(f'Plan validation failed after 3 attempts: {exc}') from exc
+                try:
+                    rejected = json.loads(raw, object_pairs_hook=no_duplicates)
+                except (ValueError, CoderError):
+                    rejected = raw
+                context = {'original_request': prompt, 'rejected_plan': rejected, 'validation_error': str(exc)}
+            else:
+                entry['status'] = 'accepted'
+                save()
+                break
         manifest.update(plan=plan, status='implementing', dependencies=dependency_status(plan['dependencies']),
                         progress={c['name']: 'pending' for c in plan['components']})
         save()
@@ -311,7 +377,8 @@ def generate_project(runtime, prompt, assessment, root, max_config):
                 'or expressions copied verbatim from the supplied source in evidence_snippets.',
                 {'original_request': prompt, 'all_requirements': plan['requirements'], 'target': req,
                  'imports': plan['imports'], 'variables': plan['variables'], 'classes': plan['classes'],
-                 'references': graph, 'source': {name: sources[name] for name in sorted(relevant)}}, REVIEW_SCHEMA), REVIEW_SCHEMA)
+                 'references': graph, 'source': {name: sources[name] for name in sorted(relevant)}},
+                REVIEW_SCHEMA, phase='verification'), REVIEW_SCHEMA)
             manifest['reviews'].append({'requirement': req['id'], **review})
             save()
             if review['verdict'] != 'pass' or review['issues'] or review['missing_requirements']:
@@ -324,6 +391,10 @@ def generate_project(runtime, prompt, assessment, root, max_config):
     except BaseException as exc:
         manifest.update(status='failed', error=str(exc) or type(exc).__name__)
         save()
+        import sys
+        print(f'Project workspace retained: {workspace}\nPlanning: {manifest["timings"]["planning"]:.2f}s; '
+              f'plan retries: {manifest["timings"]["retry"]:.2f}s; generation: {manifest["timings"]["generation"]:.2f}s; '
+              f'verification: {manifest["timings"]["verification"]:.2f}s', file=sys.stderr)
         raise
 
 

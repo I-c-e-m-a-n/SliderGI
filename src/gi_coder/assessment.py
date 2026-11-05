@@ -53,14 +53,15 @@ def validate_schema(value, schema, location='assessment'):
         raise CoderError(f'{location}: invalid value')
     if isinstance(value, dict):
         if set(value) != set(schema['required']):
-            raise CoderError(f'{location}: missing or unknown fields')
+            raise CoderError(f'{location}: missing fields {sorted(set(schema["required"]) - set(value))}; '
+                             f'unknown fields {sorted(set(value) - set(schema["required"]))}')
         for key, item in value.items():
             validate_schema(item, schema['properties'][key], location + '.' + key)
     elif isinstance(value, list):
         if len(value) > schema['maxItems']:
             raise CoderError(f'{location}: too many items')
-        for item in value:
-            validate_schema(item, schema['items'], location)
+        for index, item in enumerate(value):
+            validate_schema(item, schema['items'], f'{location}[{index}]')
     elif isinstance(value, str):
         if (not schema.get('minLength', 0) <= len(value) <= schema.get('maxLength', 10000)
                 or '\x00' in value or (schema.get('minLength', 0) and not value.strip())):
@@ -71,7 +72,7 @@ def no_duplicates(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise CoderError('Duplicate JSON field in assessment')
+            raise CoderError(f'Duplicate JSON field: {key!r}')
         result[key] = value
     return result
 

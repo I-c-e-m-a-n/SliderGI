@@ -1,5 +1,35 @@
 # Validation record
 
+## Rejected-plan retention and correction — 2026-11-05 (Singapore)
+
+Full suite: **92 discovered, 87 passed, 5 skipped** on Linux. Planning regression
+fixtures use the user's exact Pygame clock request and reject display creation,
+timer/font allocation, `time.time()`, named constants and arithmetic in shared
+initializers. Safety checks are unchanged: no expression is evaluated, and
+runtime resources must move into functions or instance state.
+
+Tests verify verbatim raw-plan retention before validation, precise indexed
+field/expression errors, malformed JSON feedback, correction on the first or
+second retry, latest-error feedback, exactly three attempts maximum, call-budget
+capacity for both retries, no implementation/publication after persistent
+failure, and no retries on runtime failures, truncated responses or cancellation.
+Truncated completion text is also checked through the actual Runtime interface
+with a mocked transport. Raw artifacts are private files in retained workspaces.
+
+An injected monotonic clock reproduces the supplied 159.793349-second planning
+duration and 787 completion-token metadata, then checks independent retry,
+component-generation and review totals. These are deterministic test inputs,
+not a benchmark or a replay of the actual Mac inference. Initial planning no
+longer duplicates the entire verbose assessment, and correction prompts retain
+the rejected plan and exact validation feedback. No real speedup is claimed.
+
+The user's original failed manifest did not contain the raw plan, so the exact
+offending expression from that run cannot be recovered retrospectively. The
+new implementation will retain it on subsequent attempts. Existing Mac/Metal,
+genuine Qwen and live Pygame validation limitations remain; the five skips are
+three opt-in Qwen tests and two Windows launchers. Python compilation and Git
+whitespace checks pass.
+
 ## Bounded single-file planning — 2026-11-05 (Singapore)
 
 Implementation decisions were based on the current source and tests, not the
