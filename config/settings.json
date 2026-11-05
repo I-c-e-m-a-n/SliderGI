@@ -6,6 +6,7 @@
   "assessment_max_tokens": 384,
   "backend": "auto",
   "gpu_layers": 99,
+  "debug_assessment": false,
   "temperature": 0.2,
   "model_path": null,
   "engine_path": null,

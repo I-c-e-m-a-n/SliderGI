@@ -1,5 +1,31 @@
 # Validation record
 
+## Assessment language/extension fix — 2026-11-05 (Singapore)
+
+Full suite: **68 discovered, 64 passed, 4 skipped**. Existing session, backend,
+timing, path and security regressions remain passing. Skips are still the two
+genuine-Qwen opt-in tests and two legacy Windows launcher tests. Python syntax
+compilation and Git whitespace checks passed.
+
+New deterministic regressions use the exact animated-clock request, including
+the prohibition on tkinter. They cover Python version/case/whitespace labels,
+missing language/extension metadata, bare and dotted extension forms, explicit
+CLI precedence, ambiguous/negated/incidental language mentions, unsafe unknown
+extensions and filename conflicts. A synthetic completion is written and syntax
+checked to verify the request and constraints reach generation; this does not
+prove Qwen generates a working animated clock.
+
+Opt-in diagnostics are tested on malformed JSON and extension-validation failure
+before normal assessment/revised-prompt files exist. Raw JSON and the original
+validation error remain in private retained debug files; normal temporary files
+are still cleaned. Logging defaults off and successful normalization can also
+be inspected when enabled. No actual failing raw Qwen assessment was available
+from the user's Mac, so the tests reproduce compatible failure shapes rather
+than claiming an observed exact model response.
+
+macOS execution and genuine Qwen inference remain unverified in this Linux
+environment without official weights. No new hardware/latency claims are made.
+
 ## Metal, timings and output-directory fixes — 2026-11-05 (Singapore)
 
 Current full suite: **59 discovered, 55 passed, 4 skipped**. Skips are the two

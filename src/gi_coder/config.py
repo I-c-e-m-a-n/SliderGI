@@ -24,6 +24,9 @@ def load_config(root=ROOT):
         config.setdefault('assessment_max_tokens', 384)
         config.setdefault('backend', 'auto')
         config.setdefault('gpu_layers', 99)
+        config.setdefault('debug_assessment', False)
+        if type(config['debug_assessment']) is not bool:
+            raise ValueError('debug_assessment must be true or false')
         if config["model"] not in MODELS:
             raise ValueError("model must be 7b or 3b")
         for name, low, high in (("context_size", 512, 32768), ("threads", 1, 256),

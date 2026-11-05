@@ -1,7 +1,11 @@
 """Schema-constrained Qwen assessment; model output is always untrusted data."""
 import json
-from .config import CoderError
-from .languages import normalize, extension_for, filename_language, LANGUAGES
+import os
+import sys
+import uuid
+from pathlib import Path
+from .config import ROOT, CoderError
+from .languages import normalize, extension_for, filename_language, LANGUAGES, requested_language
 from .generation import output_path
 
 
@@ -72,8 +76,36 @@ def no_duplicates(pairs):
     return result
 
 
-def assess(runtime, prompt, language=None, filename=None):
-    explicit_language = normalize(language) if language else None
+def assess(runtime, prompt, language=None, filename=None, root=ROOT):
+    """Retain opt-in diagnostics even when parsing/validation never completes."""
+    debug = (os.environ.get('GI_CODER_DEBUG_ASSESSMENT') == '1' or
+             runtime.config.get('debug_assessment') is True)
+    record = {'raw_assessment': None, 'validation_error': None, 'status': 'failed'}
+    def capture(raw):
+        record['raw_assessment'] = raw
+    try:
+        result = _assess(runtime, prompt, language, filename, capture)
+        record.update(status='validated', normalized_assessment=result[0])
+        return result
+    except CoderError as exc:
+        record['validation_error'] = str(exc)
+        raise
+    finally:
+        if debug:
+            try:
+                directory = root / '.gi-coder/debug'
+                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                path = directory / ('assessment-' + uuid.uuid4().hex + '.json')
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                    json.dump(record, stream, ensure_ascii=True, indent=2)
+                print(f'Assessment debug log: {path}', file=sys.stderr)
+            except OSError as exc:
+                print(f'Could not save assessment debug log: {exc}', file=sys.stderr)
+
+
+def _assess(runtime, prompt, language, filename, capture):
+    explicit_language = normalize(language) if language else requested_language(prompt)
     inferred = filename_language(filename) if filename else None
     if explicit_language and inferred and explicit_language != inferred:
         raise CoderError('Filename extension conflicts with requested language')
@@ -88,6 +120,7 @@ def assess(runtime, prompt, language=None, filename=None):
     user = json.dumps({'request': prompt, 'explicit_language': explicit_language, 'explicit_filename': filename},
                       ensure_ascii=False, separators=(',', ':'))
     raw, stats = runtime.complete(system, user, schema=SCHEMA)
+    capture(raw)
     try:
         if len(raw) > 16000:
             raise CoderError('Assessment exceeds size limit')
@@ -114,7 +147,6 @@ def assess(runtime, prompt, language=None, filename=None):
         override = explicit_language or inferred
         proposed = data['extension']
         if filename:
-            from pathlib import Path
             proposed = Path(filename).suffix or (None if data['language'] in LANGUAGES else proposed)
         elif override and data['language'] in LANGUAGES:
             proposed = None

@@ -62,7 +62,7 @@ def _process_request(runtime, prompt, language, filename, output_dir, overwrite,
     with tempfile.TemporaryDirectory(prefix='request-', dir=temporary) as work:
         print('Assessing request...', flush=True)
         started = time.monotonic()
-        assessment, assessment_stats = assess(runtime, prompt, language, filename)
+        assessment, assessment_stats = assess(runtime, prompt, language, filename, root=root)
         assessment_stats = {**assessment_stats, 'seconds': time.monotonic() - started}
         revised = json.dumps({'original_request': prompt, 'assessment': assessment},
                              ensure_ascii=False, separators=(',', ':'))

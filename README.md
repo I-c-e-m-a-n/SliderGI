@@ -224,6 +224,31 @@ metadata uses a sidecar rather than guessing comment syntax. Known language
 extensions must match the mapping. Filename validation and Python syntax checks
 are retained. The legacy `choose_language` library helper remains for V1 callers
 and regression tests; it is not used for request routing or CLI assessment.
+Explicit code instructions such as `Generate a python program` or `Write a clock
+in Python` are retained as language hints; CLI flags take precedence. Qwen still
+assesses and rewrites every request. Language labels are trimmed/case-normalized,
+including `Python 3`, `python3.12`, `py` and `.py`. Extension variants such as
+`PY` and ` .py ` normalize to `.py`. Known defaults come from the mapping file;
+unsafe/unknown extensions and conflicting filenames still fail validation.
+
+### Optional assessment diagnostics
+
+To retain raw assessment JSON and validation errors, including failures before
+normal request temporary files are written:
+
+```sh
+GI_CODER_DEBUG_ASSESSMENT=1 ./start
+```
+
+Alternatively set `"debug_assessment": true` in `config/local.json` before
+startup. Logging is off by default. Each assessment gets a unique, retained
+`.gi-coder/debug/assessment-<id>.json` with the raw model response, validation
+error/status, and normalized assessment when validation succeeds. The CLI
+prints the log path to stderr. Files are owner-only (0600), with a private
+debug directory (0700), and ignored by Git. Unlike `.gi-coder/tmp`, diagnostics
+are intentionally not removed after a failed or successful request. They can
+contain private request details; remove them manually when no longer needed.
+Failure to save a debug log does not replace the original validation error.
 
 ## Models, configuration and offline operation
 
