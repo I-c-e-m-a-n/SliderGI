@@ -32,7 +32,12 @@ def main():
         args = args[1:]
     elif not args:
         args = ["setup"]
-    return subprocess.call([str(python), "-m", "gi_coder.cli", *args], env=child_env)
+    command = [str(python), "-m", "gi_coder.cli", *args]
+    if os.name == 'posix':
+        # On macOS the CLI replaces bootstrap, so terminal signals reach the
+        # process that owns the model instead of leaving an extra waiting parent.
+        os.execve(str(python), command, child_env)
+    return subprocess.call(command, env=child_env)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ class QwenSmokeTest(unittest.TestCase):
             result = subprocess.run([sys.executable, '-m', 'gi_coder.cli', 'generate',
                 'Write a complete Python program that defines add(a, b) returning their sum, '
                 'and prints add(2, 3) inside an if __name__ == "__main__" guard.',
-                '--language', 'python', '--filename', 'smoke.py', '--offline',
+                '--language', 'python', '--filename', 'smoke.py', '--output-dir', directory, '--offline',
                 '--model', os.environ.get('GI_CODER_TEST_MODEL', '7b')],
                 cwd=directory, text=True, capture_output=True, timeout=2400)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
