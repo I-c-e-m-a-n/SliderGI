@@ -60,6 +60,9 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(list((self.root/'.gi-coder/tmp').iterdir()), [])
 
     def test_explicit_options_win_over_inferred_preferences(self):
+        self.runtime.complete.side_effect = [self.runtime.complete.return_value, (json.dumps({
+            'verdict': 'pass', 'evidence': 'Prints greeting', 'evidence_snippets': ['print("hi")'],
+            'issues': [], 'missing_requirements': []}), {})]
         self.runtime.generate.return_value = ('```python\nprint("hi")\n```', {})
         result = self.process('Give a greeting', language='python', filename='my_greeting.py')
         self.assertEqual(result['path'].name, 'my_greeting.py')

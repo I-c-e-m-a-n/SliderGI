@@ -9,6 +9,8 @@ from .assessment import assess
 from .config import ROOT, CoderError
 from .generation import extract_source, output_path, write_source
 from .languages import SPECS
+from .project import generate_project, single_manifest
+from .verification import verify_source
 
 
 def skeleton_header(source, language, functions):
@@ -84,8 +86,7 @@ def _process_request(runtime, prompt, language, filename, output_dir, overwrite,
         directory = output_dir if output_dir is not None else root.parent / 'SliderGI_Output'
         path = output_path(assessment['language'], assessment['filename'], directory,
                            extension=assessment['extension'])
-        sidecar = path.with_name(path.name + '.gi-coder.json') if not SPECS.get(
-            assessment['language'], {}).get('comment') else None
+        sidecar = path.with_name(path.name + '.gi-coder.json')
         destinations = [path] + ([sidecar] if sidecar else [])
         # macOS often uses case-insensitive filesystems; filesystem existence and
         # O_EXCL enforce collisions without guessing filesystem case behavior.
@@ -97,30 +98,66 @@ def _process_request(runtime, prompt, language, filename, output_dir, overwrite,
                 permissions[target] = True
         print('Generating...', flush=True)
         started = time.monotonic()
-        code, stats = runtime.generate(revised, assessment['language'])
-        stats = {**stats, 'seconds': time.monotonic() - started}
-        source = extract_source(code, assessment['language'])
+        workspace = None
+        config = runtime.config if isinstance(runtime.config, dict) else {}
+        incremental = assessment['language'] == 'python' and (
+            assessment['complexity'] != 'simple' or len(assessment['functions']) > 1)
+        if incremental:
+            source, manifest, workspace = generate_project(runtime, prompt, assessment, root, config)
+            stats = {}
+        else:
+            code, stats = runtime.generate(revised, assessment['language'])
+            source = extract_source(code, assessment['language'])
         if assessment['language'] == 'json':
             try:
                 json.loads(source)
             except ValueError as exc:
                 raise CoderError(f'Generated JSON is invalid: {exc}; no file written') from exc
         source, metadata = skeleton_header(source, assessment['language'], assessment['functions'])
+        if incremental:
+            manifest['verification'] = {**verify_source(source, manifest['plan']),
+                'coverage': 'model_reviewed_static_evidence_not_runtime_proof'}
+        else:
+            manifest = single_manifest(runtime, prompt, assessment, source)
+        stats = {**stats, 'seconds': time.monotonic() - started}
+        manifest['functions'] = assessment['functions']  # Retain V1 metadata compatibility.
+        manifest['output_path'] = str(path)
         # Stage sidecar first so a metadata collision cannot leave an unaccompanied
         # source file. On failure roll back only a sidecar newly created by us.
         created_sidecar = False
+        backup = None
         if sidecar:
             existed = sidecar.exists() or sidecar.is_symlink()
-            write_source(sidecar, json.dumps(metadata, ensure_ascii=False, indent=2) + '\n', permissions[sidecar])
+            if existed and permissions[sidecar]:
+                fd, name = tempfile.mkstemp(prefix='.gi-coder-manifest-backup-', dir=sidecar.parent)
+                os.close(fd)
+                backup = Path(name)
+                os.replace(sidecar, backup)
+            try:
+                write_source(sidecar, json.dumps(manifest, ensure_ascii=True, indent=2) + '\n', permissions[sidecar])
+            except BaseException:
+                if backup:
+                    os.replace(backup, sidecar)
+                raise
             created_sidecar = not existed
         try:
             write_source(path, source, permissions[path])
         except BaseException:
-            if created_sidecar:
+            if backup:
+                os.replace(backup, sidecar)
+            elif created_sidecar:
                 sidecar.unlink(missing_ok=True)
             raise
+        if backup:
+            backup.unlink()
         print(f'File created: {path}\nLanguage: {assessment["language"]}\nStatus: Complete')
         if sidecar:
-            print(f'Function metadata: {sidecar}')
+            print(f'Project manifest: {sidecar}')
+        if workspace:
+            write_source(workspace/'source.py', source, True)
+            write_source(workspace/'manifest.json', json.dumps(manifest, ensure_ascii=True, indent=2), True)
+            missing = [d['package'] for d in manifest['dependencies'] if d['installed_version'] is None]
+            if missing:
+                print('Dependencies not installed (not installed automatically): ' + ', '.join(missing))
         return {'type': 'code', 'path': path, 'assessment': assessment,
                 'statistics': {'assessment': assessment_stats, 'generation': stats}}

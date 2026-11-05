@@ -19,14 +19,14 @@ FUNCTION = {'type': 'object', 'additionalProperties': False,
 CANONICAL_SCHEMA = {'type': 'object', 'additionalProperties': False, 'properties': {
     'output_type': {'type': 'string', 'enum': ['text', 'code']},
     'objective': string(240),
-    'constraints': {'type': 'array', 'items': string(160), 'maxItems': 8},
+    'constraints': {'type': 'array', 'items': string(320), 'maxItems': 24},
     'output_format': {'type': 'string', 'enum': ['plain_text', 'source_code']},
     'language': {'type': ['string', 'null'], 'maxLength': 40},
     'filename': {'type': ['string', 'null'], 'maxLength': 200},
     'extension': {'type': ['string', 'null'], 'maxLength': 22},
     'complexity': {'type': 'string', 'enum': ['simple', 'moderate', 'complex']},
-    'revised_prompt': string(1600),
-    'functions': {'type': 'array', 'items': FUNCTION, 'maxItems': 8}},
+    'revised_prompt': string(4000),
+    'functions': {'type': 'array', 'items': FUNCTION, 'maxItems': 24}},
     'required': ['output_type', 'objective', 'constraints', 'output_format', 'language',
                  'filename', 'extension', 'complexity', 'revised_prompt', 'functions']}
 TEXT_FIELDS = ('output_type', 'objective', 'constraints', 'complexity', 'revised_prompt')
@@ -114,15 +114,16 @@ def _assess(runtime, prompt, language, filename, capture):
         'CLI language/filename require code and override guesses. Choose text/plain_text or code/source_code. '
         'Text: emit only output_type, objective, constraints, complexity, revised_prompt. '
         'Code: emit all schema fields; choose language, descriptive basename/extension, '
-        'and 1-3 short function/module summaries (name, inputs, behaviour, variables, outputs). '
+        'and sufficient function/module summaries (name, inputs, behaviour, variables, outputs). '
         'State objective, constraints, complexity and a precise revised_prompt. For greetings keep fields '
-        'and revision minimal; for complex requests preserve constraints. No extra features, files or tools.')
+        'and revision minimal; preserve complex constraints. Mark interactive/multi-feature applications '
+        'moderate or complex; simple is for small self-contained snippets. No extra features, files or tools.')
     user = json.dumps({'request': prompt, 'explicit_language': explicit_language, 'explicit_filename': filename},
                       ensure_ascii=False, separators=(',', ':'))
     raw, stats = runtime.complete(system, user, schema=SCHEMA)
     capture(raw)
     try:
-        if len(raw) > 16000:
+        if len(raw) > 128000:
             raise CoderError('Assessment exceeds size limit')
         data = json.loads(raw, object_pairs_hook=no_duplicates)
     except ValueError as exc:

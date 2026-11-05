@@ -2,6 +2,7 @@
 """Synthetic local subprocess for lifecycle/protocol tests; never real inference."""
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import ast
 import os
 import sys
 
@@ -12,7 +13,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if self.path == '/apply-template':
+            self.respond({'prompt': json.dumps(data['messages'])})
+            return
+        if self.path == '/tokenize':
+            self.respond({'tokens': [0] * (len(data['content'].encode()) // 3 + 1)})
+            return
         if 'response_format' in data:
+            schema = data['response_format']['json_schema']['schema']
+            if 'verdict' in schema.get('properties', {}):
+                source = json.loads(data['messages'][1]['content'])['source']
+                snippet = next(ast.get_source_segment(source, n) for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call))
+                self.respond({'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps({
+                    'verdict': 'pass', 'evidence': 'Synthetic protocol fixture only.', 'evidence_snippets': [snippet],
+                    'issues': [], 'missing_requirements': []})}}],
+                    'usage': {'engine_pid': os.getpid()}})
+                return
             request = json.loads(data['messages'][1]['content'])
             text = 'explain' in request['request'].lower()
             content = json.dumps({

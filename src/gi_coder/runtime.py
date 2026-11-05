@@ -76,7 +76,7 @@ class Runtime:
                    "--ctx-size", str(self.config["context_size"]),
                    "--threads", str(self.config["threads"]), "--gpu-layers", str(layers),
                    "--parallel", "1", "--batch-size", "128", "--ubatch-size", "128",
-                   "--n-predict", str(self.config["max_tokens"])]
+                   "--n-predict", str(self.config["context_size"] - 64)]
         if device:
             command.extend(['--device', device])
         try:
@@ -121,7 +121,7 @@ class Runtime:
                   "No explanations, no placeholders, no multiple files. Do not execute anything.")
         return self.complete(system, prompt)
 
-    def complete(self, system, prompt, schema=None):
+    def complete(self, system, prompt, schema=None, timeout=None):
         """Stateless chat: fresh messages and no KV/prompt reuse on every call."""
         if self.process is not None and self.process.poll() is not None:
             self.close()
@@ -131,13 +131,26 @@ class Runtime:
             "max_tokens": self.config["max_tokens"], "temperature": self.config["temperature"],
             "stream": False, "cache_prompt": False, "id_slot": 0}
         if schema is not None:
-            payload['max_tokens'] = self.config.get('assessment_max_tokens', 384)
             payload['temperature'] = 0
             payload["response_format"] = {"type": "json_schema", "json_schema": {
                 "name": "request_assessment", "strict": True, "schema": schema}}
         started = time.monotonic()
         try:
-            result = self.request("/v1/chat/completions", payload, timeout=self.config["generation_timeout"])
+            timeout = min(timeout or self.config['generation_timeout'], self.config['generation_timeout'])
+            if self.process is not None:
+                formatted = self.request('/apply-template', payload, timeout=min(timeout, 30))['prompt']
+                tokens = self.request('/tokenize', {'content': formatted, 'add_special': True},
+                                      timeout=min(timeout, 30))['tokens']
+                count = len(tokens)
+            else:
+                # Conservative bound for library/protocol tests without a loaded engine.
+                count = len((system + prompt).encode('utf-8')) + 64
+            available = self.config['context_size'] - count - 64
+            if available < 64:
+                raise CoderError('Request exceeds the configured context; increase context_size or simplify it')
+            cap = self.config.get('assessment_max_tokens') if schema is not None else self.config['max_tokens']
+            payload['max_tokens'] = min(cap, available) if cap is not None else available
+            result = self.request("/v1/chat/completions", payload, timeout=timeout)
             choice = result["choices"][0]
             if choice.get("finish_reason") != "stop":
                 raise CoderError("Generation did not finish (possibly output-token limit). "

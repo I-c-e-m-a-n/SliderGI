@@ -51,6 +51,9 @@ class AssessmentNormalizationTest(unittest.TestCase):
 
     def test_original_request_reaches_generation_with_constraints(self):
         self.respond(language='Python (Pygame)', extension='PY')
+        self.runtime.complete.side_effect = [self.runtime.complete.return_value, (json.dumps({
+            'verdict': 'pass', 'evidence': 'Synthetic normalization fixture only',
+            'evidence_snippets': ['print("clock")'], 'issues': [], 'missing_requirements': []}), {})]
         self.runtime.generate.return_value = ('```python\n# clock fixture\nprint("clock")\n```', {})
         with contextlib.redirect_stdout(io.StringIO()):
             result = process_request(self.runtime, CLOCK, root=self.root)

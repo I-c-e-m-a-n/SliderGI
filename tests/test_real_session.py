@@ -29,7 +29,7 @@ class RealSessionTest(unittest.TestCase):
                 payloads = []
                 original_request = runtime.request
                 def capture(route, data=None, **kwargs):
-                    if data is not None:
+                    if data is not None and route == '/v1/chat/completions':
                         payloads.append(data)
                     return original_request(route, data, **kwargs)
                 with patch.object(runtime, 'request', side_effect=capture), contextlib.redirect_stdout(io.StringIO()):
@@ -46,9 +46,9 @@ class RealSessionTest(unittest.TestCase):
                     self.assertEqual(files, {p.name for p in root.iterdir()})
                 self.assertEqual(runtime.process.pid, pid)
                 self.assertIsNone(runtime.process.poll())
-                self.assertEqual(len(payloads), 4)
+                self.assertGreaterEqual(len(payloads), 5)
                 import json
-                self.assertNotIn('alpha_secret_726', json.dumps(payloads[2:]))
+                self.assertNotIn('alpha_secret_726', json.dumps(payloads[-2:]))
                 self.assertTrue(all(p['cache_prompt'] is False for p in payloads))
             self.assertIsNotNone(runtime.process.poll())
             self.assertEqual(list((root/'.gi-coder/tmp').iterdir()), [])

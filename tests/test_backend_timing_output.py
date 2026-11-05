@@ -83,6 +83,7 @@ class BackendTimingOutputTest(unittest.TestCase):
                 command = create.call_args.args[0]
                 self.assertEqual(command[command.index('--gpu-layers')+1], '12')
                 self.assertEqual(command[command.index('--device')+1], 'Metal')
+                self.assertEqual(command[command.index('--n-predict')+1], str(load_config()['context_size'] - 64))
                 runtime.close()
 
     def build_mocks(self):
@@ -179,7 +180,8 @@ class BackendTimingOutputTest(unittest.TestCase):
             assessment_payload = request.call_args.args[1]
             runtime.generate('Write Python', 'python')
             code_payload = request.call_args.args[1]
-        self.assertEqual(assessment_payload['max_tokens'], 384)
+        self.assertGreater(assessment_payload['max_tokens'], 384)
+        self.assertLess(assessment_payload['max_tokens'], load_config()['context_size'])
         self.assertEqual(assessment_payload['temperature'], 0)
         self.assertEqual(code_payload['max_tokens'], 768)
         self.assertEqual(stats['seconds'], 1)
@@ -199,7 +201,7 @@ class BackendTimingOutputTest(unittest.TestCase):
         directory.mkdir()
         (directory/'settings.json').write_bytes((ROOT/'config/settings.json').read_bytes())
         for data in ({'backend': 'cuda'}, {'gpu_layers': -1}, {'gpu_layers': True},
-                     {'assessment_max_tokens': 0}, {'assessment_max_tokens': 2048}):
+                     {'assessment_max_tokens': 0}, {'assessment_max_tokens': 4096}):
             (directory/'local.json').write_text(json.dumps(data))
             with self.subTest(data=data), self.assertRaises(CoderError):
                 load_config(self.root)

@@ -29,7 +29,7 @@ class CoreTests(unittest.TestCase):
             switch_model('bad', self.root)
 
     def test_invalid_configuration(self):
-        for data in ({'threads': 0}, {'max_tokens': 2048}, {'model': 'other'}, {'model_path': 42}):
+        for data in ({'threads': 0}, {'max_tokens': 4096}, {'model': 'other'}, {'model_path': 42}):
             (self.root / 'config/local.json').write_text(json.dumps(data))
             with self.subTest(data=data), self.assertRaises(CoderError):
                 load_config(self.root)

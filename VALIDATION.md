@@ -1,5 +1,40 @@
 # Validation record
 
+## Bounded single-file planning — 2026-11-05 (Singapore)
+
+Implementation decisions were based on the current source and tests, not the
+previous README. Full suite: **83 discovered, 78 passed, 5 skipped**. The skips
+are three opt-in real-Qwen tests and two legacy Windows launchers. Existing
+tests were adapted where the requested behavior changed: the former 384-token
+assertion now checks an adaptive context-bounded budget; simple Python fixtures
+supply the new semantic-review response. Original runtime, Metal selection,
+text, timing, path/overwrite, debugging and signal checks continue passing.
+
+New deterministic checks cover exact-template token capacity and explicit caps,
+oversized-prompt rejection without model reload, topological component order,
+minimal component context, classes/methods, manifest checkpoint/source hashes,
+signature drift, missing imports, undeclared dependencies, disconnected code
+and shared state, cycles/resource limits, missing controls, forbidden tkinter
+imports and nonexistent review evidence. The expanded Pygame clock fixture has
+local-time fractional hand angles, twelve hour notches, frame updates, Space
+analog/digital switching and C colour cycling. Its handwritten time/control
+functions are unit tested; no model-generated program or GUI is executed.
+
+Both plan and review schemas convert with the pinned llama.cpp C++ grammar
+compiler (5,205 and 1,138 grammar characters). Python compilation, shell syntax
+and Git whitespace checks pass. The pinned server source was inspected for its
+global n_predict clamp; startup now uses a context-bound server ceiling so
+larger request-level assessment budgets actually take effect.
+
+The new genuine clock test was explicitly attempted. It stops before inference
+because official 7B weights/receipt are missing in this cloud. There is no Mac
+host here. Actual Qwen planning/code quality, Pygame GUI behavior, dependencies'
+runtime APIs and macOS/Metal performance remain unverified. Static analysis and
+model review (even with real source evidence) are not proof of functional
+correctness. Incremental verification currently targets conventional single-file
+Python applications; other languages retain framing-only single-pass output.
+See docs/incremental-generation.md for safeguards and exact on-Mac commands.
+
 ## Assessment language/extension fix — 2026-11-05 (Singapore)
 
 Full suite: **68 discovered, 64 passed, 4 skipped**. Existing session, backend,

@@ -1,5 +1,9 @@
 # GI-Coder 1.1 — local coding and answers on macOS
 
+The current branch adds bounded, function-by-function Python implementation
+and central project manifests. See [incremental generation](docs/incremental-generation.md)
+for the source-verified pipeline, resource settings and limitations.
+
 GI-Coder uses Qwen2.5-Coder GGUF and a pinned official llama.cpp runtime on your
 Mac. It assesses English requests, answers ordinary questions in the terminal,
 or writes one source file in the installation's sibling `SliderGI_Output` folder. No Ollama, hosted inference,
@@ -69,8 +73,8 @@ cross-session worker or background daemon.
 Allow roughly 15 GB free disk for one model and setup headroom. 7B Q4_K_M weights
 are roughly 4.7 GB; 3B roughly 2 GB. RAM requirements exceed weight size and vary
 with context. Start with 3B on memory-constrained Macs. CPU speed/RAM estimates
-are not performance measurements. Defaults: four threads, 2,048 context tokens,
-768 generation tokens, a separate 384-token assessment budget and one inference sequence.
+are not performance measurements. Defaults: four threads, 4,096 context tokens,
+768 generation tokens per component, context-bounded assessment output and one inference sequence.
 
 ## Metal acceleration and fallback
 
@@ -162,7 +166,7 @@ execution. No generated program or dependency installer is executed.
 
 `User input → Qwen assessment → validated revised prompt → Qwen generation → output`
 
-Both calls use the same loaded runtime. Each call contains only its own system
+All assessment, planning, component and review calls use the same loaded runtime. Each call contains only its own system
 and user messages with `cache_prompt=false` and one fixed inference slot. On
 the pinned llama.cpp implementation this clears prior KV tokens before the new
 prompt. Context shifting is disabled so an oversized request fails rather than
@@ -187,8 +191,9 @@ prove that the model understood every semantic constraint correctly.
 
 Each successful response, including text, ends with actual monotonic-clock
 measurements: `Assessment`, `Generation`, and `Total` in seconds. Assessment
-includes inference and validation; generation measures its separate inference
-call. Total runs from request entry through output and temporary-file cleanup,
+includes inference and validation. Generation includes Python planning,
+component integration and requirement review (one call for text). Total runs
+from request entry through output and temporary-file cleanup,
 including file I/O or overwrite consent, but excluding initial model setup/load.
 Measurements are unrounded internally and displayed to two decimal places.
 They are local wall-clock durations, never values supplied by Qwen. Total can
@@ -196,8 +201,8 @@ exceed the sum of the two stages. A zero display can reflect sub-0.005s mocked
 calls; it is not an inference performance claim.
 
 Latency changes reduce assessment instructions and text-schema output fields,
-use compact JSON prompts, deterministic assessment sampling, and a separate
-`assessment_max_tokens` limit. No assessment or rewrite is skipped. Complex
+use compact JSON prompts and deterministic assessment sampling. The optional
+`assessment_max_tokens` limit defaults to null (available context). No assessment or rewrite is skipped. Complex
 assessments that reach their budget fail without writing files; increase that
 limit and context as needed rather than silently losing constraints.
 
@@ -278,8 +283,8 @@ and receipts. No remote inference fallback or telemetry is introduced.
 Defaults are in `config/settings.json`; overrides go in ignored `config/local.json`:
 
 ```json
-{"model": "3b", "context_size": 2048, "threads": 4, "max_tokens": 768,
- "assessment_max_tokens": 384, "backend": "auto", "gpu_layers": 99,
+{"model": "3b", "context_size": 4096, "threads": 4, "max_tokens": 768,
+ "assessment_max_tokens": null, "backend": "auto", "gpu_layers": 99,
  "temperature": 0.2, "model_path": null, "engine_path": null,
  "load_timeout": 300, "generation_timeout": 1800}
 ```
@@ -344,8 +349,8 @@ chat template with `--jinja`. No user API key or externally hosted server.
 * Runtime connection/load failure: the owned process is stopped; restart the CLI.
 
 Generated code may still contain logical errors. Review it before execution.
-This stage intentionally has no multi-file program generation, task splitting,
-tool execution, MCP integration, agents or scheduling.
+This stage has bounded, flat single-file Python decomposition. It has no
+multi-file program generation, tool execution, MCP integration, agents or scheduling.
 
 Original wrapper: MIT. See [LICENSES.md](LICENSES.md) for upstream attribution
 and model-specific licence locations. Official references:
